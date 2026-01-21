@@ -822,6 +822,7 @@ impl NetworkTask {
                     match msg {
                         quorum_store_msg @ (ConsensusMsg::SignedBatchInfo(_)
                         | ConsensusMsg::BatchMsg(_)
+                        | ConsensusMsg::BatchMsgV2(_)
                         | ConsensusMsg::ProofOfStoreMsg(_)) => {
                             Self::push_msg(
                                 peer_id,

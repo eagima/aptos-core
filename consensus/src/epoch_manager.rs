@@ -906,6 +906,7 @@ impl<P: OnChainConfigProvider> EpochManager<P> {
             self.config.quorum_store.enable_opt_quorum_store,
             self.config.quorum_store.opt_qs_minimum_batch_age_usecs,
             failures_tracker.clone(),
+            self.config.quorum_store.enable_batch_v2,
         ));
 
         info!(epoch = epoch, "Create ProposalGenerator");

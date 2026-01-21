@@ -449,7 +449,7 @@ impl PipelineBuilder {
             async move {
                 derived_self_key_share_rx
                     .await
-                    .map_err(|_| TaskError::from(anyhow!("commit proof tx cancelled")))
+                    .map_err(|_| TaskError::from(anyhow!("derived self key share tx cancelled")))
             },
             Some(&mut abort_handles),
         );

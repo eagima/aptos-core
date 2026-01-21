@@ -37,28 +37,30 @@ impl PipelineBuilder {
 
         tracker.start_working();
 
-        if secret_share_config.is_none() {
-            return Ok((
-                input_txns,
-                max_txns_from_block_to_execute,
-                block_gas_limit,
-                None,
-            ));
-        }
+        assert!(secret_share_config.is_some());
+
+        // if secret_share_config.is_none() {
+        //     return Ok((
+        //         input_txns,
+        //         max_txns_from_block_to_execute,
+        //         block_gas_limit,
+        //         None,
+        //     ));
+        // }
 
         let (encrypted_txns, unencrypted_txns): (Vec<_>, Vec<_>) = input_txns
             .into_iter()
             .partition(|txn| txn.is_encrypted_txn());
 
         // TODO: figure out handling of
-        if encrypted_txns.is_empty() {
-            return Ok((
-                unencrypted_txns,
-                max_txns_from_block_to_execute,
-                block_gas_limit,
-                None,
-            ));
-        }
+        // if encrypted_txns.is_empty() {
+        //     return Ok((
+        //         unencrypted_txns,
+        //         max_txns_from_block_to_execute,
+        //         block_gas_limit,
+        //         None,
+        //     ));
+        // }
 
         let digest_key: DigestKey = secret_share_config
             .as_ref()

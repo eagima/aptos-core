@@ -821,6 +821,7 @@ impl NetworkTask {
                         .inc();
                     match msg {
                         quorum_store_msg @ (ConsensusMsg::SignedBatchInfo(_)
+                        | ConsensusMsg::SignedBatchInfoMsgV2(_)
                         | ConsensusMsg::BatchMsg(_)
                         | ConsensusMsg::BatchMsgV2(_)
                         | ConsensusMsg::ProofOfStoreMsg(_)

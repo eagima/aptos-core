@@ -1274,8 +1274,8 @@ impl<P: OnChainConfigProvider> EpochManager<P> {
 
         let secret_sharing_config = {
             // TODO(ibalajiarun): Replace with proper DKG-based setup for production
-            let seed = epoch_state.epoch; // Use epoch as seed for deterministic testing
-            let max_batch_size = 128; // Maximum number of transactions in a batch
+            let seed = 100u64; // Use epoch as seed for deterministic testing
+            let max_batch_size = 32; // Maximum number of transactions in a batch
             let number_of_rounds = 200; // Number of rounds for the encryption scheme
 
             let num_validators = epoch_state.verifier.len();

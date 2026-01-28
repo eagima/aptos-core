@@ -1747,7 +1747,9 @@ where
                     versioned_cache
                         .data()
                         .write(k, txn_idx, 0, triomphe::Arc::new(v), None)
-                        .map_err(|_| ())?;
+                        .map_err(|e| {
+                            error!("Pre-write failed for txn {}: {:?}", txn_idx, e);
+                        })?;
                 }
             }
         }
@@ -1884,7 +1886,9 @@ where
                     versioned_cache
                         .data()
                         .write(k, txn_idx, 0, triomphe::Arc::new(v), None)
-                        .map_err(|_| ())?;
+                        .map_err(|e| {
+                            error!("Pre-write failed for txn {}: {:?}", txn_idx, e);
+                        })?;
                 }
             }
         }

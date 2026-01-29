@@ -31,7 +31,12 @@ use aptos_netcore::transport::{
 };
 use aptos_time_service::TimeService;
 use aptos_types::{chain_id::ChainId, network_address::NetworkAddress, PeerId};
-use std::{clone::Clone, collections::HashMap, fmt::Debug, sync::Arc};
+use std::{
+    clone::Clone,
+    collections::{HashMap, HashSet},
+    fmt::Debug,
+    sync::Arc,
+};
 use tokio::runtime::Handle;
 
 /// Inbound and Outbound connections are always secured with NoiseIK.  The dialer
@@ -81,6 +86,7 @@ struct PeerManagerContext {
     inbound_connection_limit: usize,
     tcp_buffer_cfg: TCPBufferCfg,
     access_control_policy: Option<Arc<AccessControlPolicy>>,
+    priority_inbound_peers: HashSet<PeerId>,
 }
 
 impl PeerManagerContext {
@@ -104,6 +110,7 @@ impl PeerManagerContext {
         inbound_connection_limit: usize,
         tcp_buffer_cfg: TCPBufferCfg,
         access_control_policy: Option<Arc<AccessControlPolicy>>,
+        priority_inbound_peers: HashSet<PeerId>,
     ) -> Self {
         Self {
             pm_reqs_tx,
@@ -121,6 +128,7 @@ impl PeerManagerContext {
             inbound_connection_limit,
             tcp_buffer_cfg,
             access_control_policy,
+            priority_inbound_peers,
         }
     }
 
@@ -179,6 +187,7 @@ impl PeerManagerBuilder {
         inbound_connection_limit: usize,
         tcp_buffer_cfg: TCPBufferCfg,
         access_control_policy: Option<Arc<AccessControlPolicy>>,
+        priority_inbound_peers: HashSet<PeerId>,
     ) -> Self {
         // Setup channel to send requests to peer manager.
         let (pm_reqs_tx, pm_reqs_rx) = aptos_channel::new(
@@ -214,6 +223,7 @@ impl PeerManagerBuilder {
                 inbound_connection_limit,
                 tcp_buffer_cfg,
                 access_control_policy,
+                priority_inbound_peers,
             )),
             peer_manager: None,
             listen_address,
@@ -348,6 +358,7 @@ impl PeerManagerBuilder {
             pm_context.max_message_size,
             pm_context.inbound_connection_limit,
             pm_context.access_control_policy,
+            pm_context.priority_inbound_peers,
         );
 
         // PeerManager constructor appends a public key to the listen_address.

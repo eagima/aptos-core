@@ -116,7 +116,8 @@ fn build_test_peer_manager(
         constants::MAX_FRAME_SIZE,
         constants::MAX_MESSAGE_SIZE,
         MAX_INBOUND_CONNECTIONS,
-        None, /* access_control_policy */
+        None,                             /* access_control_policy */
+        std::collections::HashSet::new(), /* priority_peers */
     );
 
     (
@@ -796,10 +797,108 @@ fn create_peer_manager_with_policy(
         constants::MAX_MESSAGE_SIZE,
         MAX_INBOUND_CONNECTIONS,
         policy.map(std::sync::Arc::new),
+        std::collections::HashSet::new(), /* priority_peers */
     )
 }
 
 /// Creates a new tokio runtime for testing
 fn create_test_runtime() -> Runtime {
     Runtime::new().unwrap()
+}
+
+// Helper function to build a test peer manager with priority inbound peers
+fn build_test_peer_manager_with_priority(
+    executor: Handle,
+    peer_id: PeerId,
+    priority_inbound_peers: std::collections::HashSet<PeerId>,
+) -> (
+    PeerManager<
+        BoxedTransport<Connection<MemorySocket>, impl std::error::Error + Sync + Send + 'static>,
+        MemorySocket,
+    >,
+    aptos_channel::Sender<(PeerId, ProtocolId), PeerManagerRequest>,
+    aptos_channel::Sender<PeerId, ConnectionRequest>,
+    conn_notifs_channel::Receiver,
+) {
+    let (peer_manager_request_tx, peer_manager_request_rx) =
+        aptos_channel::new(QueueStyle::FIFO, 1, None);
+    let (connection_reqs_tx, connection_reqs_rx) = aptos_channel::new(QueueStyle::FIFO, 1, None);
+    let (hello_tx, _hello_rx) = aptos_channel::new(QueueStyle::FIFO, 1, None);
+    let (conn_status_tx, conn_status_rx) = conn_notifs_channel::new();
+
+    let network_id = NetworkId::Validator;
+    let peer_manager = PeerManager::new(
+        executor,
+        TimeService::mock(),
+        build_test_transport(),
+        NetworkContext::mock_with_peer_id(peer_id),
+        "/memory/0".parse().unwrap(),
+        PeersAndMetadata::new(&[network_id]),
+        peer_manager_request_rx,
+        connection_reqs_rx,
+        [(ProtocolId::DiscoveryDirectSend, hello_tx)]
+            .iter()
+            .cloned()
+            .collect(),
+        vec![conn_status_tx],
+        constants::NETWORK_CHANNEL_SIZE,
+        constants::MAX_FRAME_SIZE,
+        constants::MAX_MESSAGE_SIZE,
+        MAX_INBOUND_CONNECTIONS,
+        None, /* access_control_policy */
+        priority_inbound_peers,
+    );
+
+    (
+        peer_manager,
+        peer_manager_request_tx,
+        connection_reqs_tx,
+        conn_status_rx,
+    )
+}
+
+#[test]
+fn test_priority_peer_config_default() {
+    // Test that priority_inbound_peers defaults to empty set
+    let config = aptos_config::config::NetworkConfig::default();
+    assert!(config.priority_inbound_peers.is_empty());
+}
+
+#[test]
+fn test_priority_peer_accepted_below_limit() {
+    // Test that priority peers are accepted when below the connection limit
+    let runtime = create_test_runtime();
+    let peer_ids = ordered_peer_ids(5);
+    let priority_peer = peer_ids[0];
+
+    let mut priority_inbound_peers = std::collections::HashSet::new();
+    priority_inbound_peers.insert(priority_peer);
+
+    let (mut peer_manager, _pm_reqs_tx, _conn_reqs_tx, _conn_status_rx) =
+        build_test_peer_manager_with_priority(
+            runtime.handle().clone(),
+            PeerId::random(),
+            priority_inbound_peers,
+        );
+
+    // Create inbound connection for priority peer
+    let (inbound, _outbound) = build_test_connection();
+    let conn = Connection {
+        socket: inbound,
+        metadata: ConnectionMetadata::new(
+            priority_peer,
+            ConnectionId::default(),
+            "/memory/0".parse().unwrap(),
+            ConnectionOrigin::Inbound,
+            MessagingProtocolVersion::V1,
+            ProtocolIdSet::mock(),
+            PeerRole::Unknown,
+        ),
+    };
+
+    // Add the priority peer connection
+    peer_manager.handle_new_connection_event(conn);
+
+    // Verify it was accepted
+    assert!(peer_manager.active_peers.contains_key(&priority_peer));
 }

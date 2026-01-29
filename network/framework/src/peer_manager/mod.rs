@@ -37,8 +37,9 @@ use futures::{
     sink::SinkExt,
     stream::StreamExt,
 };
+use rand::{rngs::OsRng, seq::SliceRandom};
 use std::{
-    collections::{hash_map::Entry, HashMap},
+    collections::{hash_map::Entry, HashMap, HashSet},
     marker::PhantomData,
     sync::Arc,
     time::Duration,
@@ -121,6 +122,9 @@ where
     inbound_connection_limit: usize,
     /// Access control policy for peer connections
     access_control_policy: Option<Arc<AccessControlPolicy>>,
+    /// Priority inbound peers that can bypass inbound connection
+    /// limits (by evicting lower-priority connections).
+    priority_inbound_peers: HashSet<PeerId>,
 }
 
 impl<TTransport, TSocket> PeerManager<TTransport, TSocket>
@@ -149,6 +153,7 @@ where
         max_message_size: usize,
         inbound_connection_limit: usize,
         access_control_policy: Option<Arc<AccessControlPolicy>>,
+        priority_inbound_peers: HashSet<PeerId>,
     ) -> Self {
         let (transport_notifs_tx, transport_notifs_rx) = aptos_channels::new(
             channel_size,
@@ -191,6 +196,7 @@ where
             max_message_size,
             inbound_connection_limit,
             access_control_policy,
+            priority_inbound_peers,
         }
     }
 
@@ -259,6 +265,53 @@ where
 
         // Otherwise, allow all peers by default
         Ok(())
+    }
+
+    /// Checks if a peer is in the priority inbound peers set
+    fn is_priority_inbound_peer(&self, peer_id: &PeerId) -> bool {
+        self.priority_inbound_peers.contains(peer_id)
+    }
+
+    /// Attempts to find a peer that can be evicted to make room for a priority peer.
+    /// Returns the peer ID of the peer to evict, or none (if no suitable candidate exists).
+    fn try_evict_peer_for_priority(&self) -> Option<PeerId> {
+        // Find evictable peers (i.e., inbound connection, unknown role, non-priority)
+        let evictable_peers: Vec<PeerId> = self
+            .active_peers
+            .iter()
+            .filter(|(peer_id, (metadata, _))| {
+                metadata.origin == ConnectionOrigin::Inbound
+                    && metadata.role == PeerRole::Unknown
+                    && !self.is_priority_inbound_peer(peer_id)
+            })
+            .map(|(peer_id, _)| *peer_id)
+            .collect();
+
+        // Randomly select one of the candidates
+        evictable_peers.choose(&mut OsRng).copied()
+    }
+
+    /// Synchronously disconnects a peer by ID, removing it from active_peers and metadata
+    fn disconnect_peer_by_id(&mut self, peer_id: PeerId) {
+        if let Some((metadata, peer_handle)) = self.active_peers.remove(&peer_id) {
+            let connection_id = metadata.connection_id;
+
+            // Drop the peer handle to trigger disconnection
+            drop(peer_handle);
+
+            // Remove from connection metadata storage
+            self.remove_peer_from_metadata(peer_id, connection_id);
+
+            info!(
+                NetworkSchema::new(&self.network_context),
+                peer_id = peer_id,
+                "Disconnected peer for priority eviction"
+            );
+
+            // Update metrics
+            self.update_connected_peers_metrics();
+            counters::update_priority_peer_evictions(&self.network_context);
+        }
     }
 
     /// Start listening on the set address and return a future which runs PeerManager
@@ -419,17 +472,48 @@ where
                     .contains_key(&conn.metadata.remote_peer_id)
                     && unknown_inbound_conns + 1 > self.inbound_connection_limit
                 {
-                    info!(
-                        NetworkSchema::new(&self.network_context)
-                            .connection_metadata_with_address(&conn.metadata),
-                        "{} Connection rejected due to connection limit: {}",
-                        self.network_context,
-                        conn.metadata
-                    );
-                    counters::connections_rejected(&self.network_context, conn.metadata.origin)
-                        .inc();
-                    self.disconnect(conn);
-                    return;
+                    // Check if incoming peer is a priority peer
+                    if self.is_priority_inbound_peer(&conn.metadata.remote_peer_id) {
+                        // Try to evict a non-priority unknown peer
+                        if let Some(peer_id_to_evict) = self.try_evict_peer_for_priority() {
+                            info!(
+                                NetworkSchema::new(&self.network_context),
+                                priority_peer = conn.metadata.remote_peer_id,
+                                evicted_peer = peer_id_to_evict,
+                                "Evicting peer to make room for priority peer!"
+                            );
+
+                            // Disconnect the peer
+                            self.disconnect_peer_by_id(peer_id_to_evict);
+                        } else {
+                            // All slots taken by other priority peers
+                            warn!(
+                                NetworkSchema::new(&self.network_context),
+                                priority_peer = conn.metadata.remote_peer_id,
+                                "Cannot accept priority peer. All slots occupied by priority peers!"
+                            );
+                            counters::connections_rejected(
+                                &self.network_context,
+                                conn.metadata.origin,
+                            )
+                            .inc();
+                            self.disconnect(conn);
+                            return;
+                        }
+                    } else {
+                        // Non-priority peer, reject the connection
+                        info!(
+                            NetworkSchema::new(&self.network_context)
+                                .connection_metadata_with_address(&conn.metadata),
+                            "{} Connection rejected due to connection limit: {}",
+                            self.network_context,
+                            conn.metadata
+                        );
+                        counters::connections_rejected(&self.network_context, conn.metadata.origin)
+                            .inc();
+                        self.disconnect(conn);
+                        return;
+                    }
                 }
             }
         }

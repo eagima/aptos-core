@@ -61,6 +61,26 @@ module addr::cli_e2e_tests {
         weight: u64,
     }
 
+    // Test structs for struct/enum transaction arguments
+
+    /// A simple public struct with copy ability for testing struct arguments
+    public struct Point has copy, drop {
+        x: u64,
+        y: u64,
+    }
+
+    /// A public struct with nested struct fields
+    public struct Rectangle has copy, drop {
+        top_left: Point,
+        bottom_right: Point,
+    }
+
+    /// A public struct with vector field
+    public struct Data has copy, drop {
+        values: vector<u64>,
+        name: String,
+    }
+
     fun init_module(account: &signer) {
         let collection = string::utf8(b"Hero Quest");
         collection::create_unlimited_collection(
@@ -362,5 +382,73 @@ module addr::cli_e2e_tests {
         assert!(object::is_owner(hero, account_address), 12);
         assert!(object::is_owner(weapon, account_address), 13);
         assert!(object::is_owner(gem, account_address), 14);
+    }
+
+    // Test entry functions for struct/enum transaction arguments
+
+    /// Test entry function that takes a Point argument
+    public entry fun test_struct_point(_account: &signer, p: Point) {
+        // Verify the point values are valid
+        assert!(p.x >= 0 && p.y >= 0, 100);
+    }
+
+    /// Test entry function that takes a Rectangle argument
+    public entry fun test_struct_rectangle(_account: &signer, rect: Rectangle) {
+        // Verify rectangle dimensions are valid
+        assert!(rect.bottom_right.x >= rect.top_left.x, 101);
+        assert!(rect.bottom_right.y >= rect.top_left.y, 102);
+    }
+
+    /// Test entry function that takes Option::Some
+    public entry fun test_option_some(_account: &signer, opt: Option<u64>) {
+        // Verify it's Some and has expected value
+        assert!(option::is_some(&opt), 103);
+        let value = option::destroy_some(opt);
+        assert!(value == 100, 104);
+    }
+
+    /// Test entry function that takes Option::None
+    public entry fun test_option_none(_account: &signer, opt: Option<u64>) {
+        // Verify it's None
+        assert!(option::is_none(&opt), 105);
+        option::destroy_none(opt);
+    }
+
+    /// Test entry function that takes Option<Point>
+    public entry fun test_option_point(_account: &signer, opt: Option<Point>) {
+        // Verify it's Some and contains a valid point
+        assert!(option::is_some(&opt), 106);
+        let point = option::destroy_some(opt);
+        assert!(point.x == 50 && point.y == 75, 107);
+    }
+
+    /// Test entry function with mixed primitive and struct arguments
+    public entry fun test_mixed_args(_account: &signer, num: u64, p: Point, flag: bool) {
+        assert!(num == 42, 108);
+        assert!(p.x == 10 && p.y == 20, 109);
+        assert!(flag == true, 110);
+    }
+
+    /// Test entry function with type arguments and struct arguments
+    public entry fun test_generic_with_struct<T: drop, U: drop>(
+        _account: &signer,
+        p: Point,
+        value: u64
+    ) {
+        assert!(p.x == 15 && p.y == 25, 111);
+        assert!(value == 999, 112);
+    }
+
+    /// Test entry function with Data struct containing vector
+    public entry fun test_data_struct(_account: &signer, data: Data) {
+        use std::vector;
+
+        // Verify vector contents
+        assert!(vector::length(&data.values) == 5, 113);
+        assert!(*vector::borrow(&data.values, 0) == 1, 114);
+        assert!(*vector::borrow(&data.values, 4) == 5, 115);
+
+        // Verify name
+        assert!(string::bytes(&data.name) == &b"test_data", 116);
     }
 }

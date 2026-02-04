@@ -994,6 +994,7 @@ dependencies = [
  "aptos-netcore",
  "aptos-network",
  "aptos-peer-monitoring-service-types",
+ "aptos-proxy-primary",
  "aptos-reliable-broadcast",
  "aptos-resource-viewer",
  "aptos-runtimes",
@@ -3777,6 +3778,35 @@ name = "aptos-proxy"
 version = "0.1.0"
 dependencies = [
  "ipnet",
+]
+
+[[package]]
+name = "aptos-proxy-primary"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "aptos-channels",
+ "aptos-config",
+ "aptos-consensus-types",
+ "aptos-crypto",
+ "aptos-infallible",
+ "aptos-logger",
+ "aptos-metrics-core",
+ "aptos-network",
+ "aptos-safety-rules",
+ "aptos-secure-storage",
+ "aptos-time-service",
+ "aptos-types",
+ "async-trait",
+ "claims",
+ "futures",
+ "once_cell",
+ "prometheus",
+ "proptest",
+ "serde",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
 ]
 
 [[package]]

@@ -224,6 +224,7 @@ fn create_node_for_fuzzing() -> RoundManager {
         None,
         Arc::new(MockPastProposalStatusTracker {}),
         opt_proposal_loopback_tx,
+        None, // proxy_event_tx
     )
 }
 

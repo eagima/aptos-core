@@ -987,6 +987,7 @@ impl<P: OnChainConfigProvider> EpochManager<P> {
             fast_rand_config,
             failures_tracker,
             opt_proposal_loopback_tx,
+            None, // proxy_event_tx: TODO: Initialize when proxy consensus is enabled
         );
 
         round_manager.init(last_vote).await;
@@ -998,6 +999,7 @@ impl<P: OnChainConfigProvider> EpochManager<P> {
             buffered_proposal_rx,
             opt_proposal_loopback_rx,
             close_rx,
+            None, // proxy_event_rx: TODO: Initialize when proxy consensus is enabled
         ));
 
         self.spawn_block_retrieval_task(epoch, block_store, max_blocks_allowed);

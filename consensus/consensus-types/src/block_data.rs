@@ -470,6 +470,42 @@ impl BlockData {
         }
     }
 
+    /// Creates a new proxy BlockData directly (not from OptProxyBlockData).
+    /// This is used when creating proxy block proposals with the full parent QC available.
+    pub fn new_from_proxy(
+        epoch: u64,
+        round: Round,
+        timestamp_usecs: u64,
+        quorum_cert: QuorumCert,
+        validator_txns: Vec<ValidatorTransaction>,
+        payload: Payload,
+        author: Author,
+        _failed_authors: Vec<(Round, Author)>,
+        primary_round: Round,
+        primary_qc: Option<QuorumCert>,
+    ) -> Self {
+        // Create the grandparent QC from the parent's parent (via quorum_cert)
+        // Note: For the regular (non-optimistic) path, grandparent_qc is the parent's QC
+        let grandparent_qc = quorum_cert.clone();
+
+        let proxy_body = OptProxyBlockBody::V0 {
+            validator_txns,
+            payload,
+            author,
+            grandparent_qc,
+            primary_round,
+            primary_qc,
+        };
+
+        Self {
+            epoch,
+            round,
+            timestamp_usecs,
+            quorum_cert,
+            block_type: BlockType::ProxyBlock(proxy_body),
+        }
+    }
+
     /// It's a reconfiguration suffix block if the parent block's executed state indicates next epoch.
     pub fn is_reconfiguration_suffix(&self) -> bool {
         self.quorum_cert.certified_block().has_reconfiguration()

@@ -46,6 +46,7 @@ use aptos_consensus_types::{
     pipelined_block::PipelinedBlock,
     proof_of_store::{BatchInfo, BatchInfoExt, ProofCache, ProofOfStoreMsg, SignedBatchInfoMsg},
     proposal_msg::ProposalMsg,
+    proxy_messages::OrderedProxyBlocksMsg,
     quorum_cert::QuorumCert,
     round_timeout::{RoundTimeout, RoundTimeoutMsg, RoundTimeoutReason},
     sync_info::SyncInfo,
@@ -56,6 +57,7 @@ use aptos_consensus_types::{
     wrapped_ledger_info::WrappedLedgerInfo,
 };
 use aptos_crypto::{hash::CryptoHash, HashValue};
+use aptos_proxy_primary::{PrimaryBlockFromProxy, PrimaryToProxyEvent, ProxyToPrimaryEvent};
 use aptos_infallible::{checked, Mutex};
 use aptos_logger::prelude::*;
 #[cfg(test)]
@@ -82,7 +84,7 @@ use std::{
     time::Duration,
 };
 use tokio::{
-    sync::oneshot as TokioOneshot,
+    sync::{mpsc as TokioMpsc, oneshot as TokioOneshot},
     time::{sleep, Instant},
 };
 
@@ -342,6 +344,10 @@ pub struct RoundManager {
     proposal_status_tracker: Arc<dyn TPastProposalStatusTracker>,
     pending_opt_proposals: BTreeMap<Round, OptBlockData>,
     opt_proposal_loopback_tx: aptos_channels::UnboundedSender<OptBlockData>,
+    // Proxy consensus integration: pending proxy blocks to be included in primary block
+    pending_proxy_blocks: Option<PrimaryBlockFromProxy>,
+    // Channel to send events (QC/TC updates) to proxy consensus
+    proxy_event_tx: Option<TokioMpsc::UnboundedSender<PrimaryToProxyEvent>>,
 }
 
 impl RoundManager {
@@ -364,6 +370,7 @@ impl RoundManager {
         fast_rand_config: Option<RandConfig>,
         proposal_status_tracker: Arc<dyn TPastProposalStatusTracker>,
         opt_proposal_loopback_tx: aptos_channels::UnboundedSender<OptBlockData>,
+        proxy_event_tx: Option<TokioMpsc::UnboundedSender<PrimaryToProxyEvent>>,
     ) -> Self {
         // when decoupled execution is false,
         // the counter is still static.
@@ -400,6 +407,8 @@ impl RoundManager {
             proposal_status_tracker,
             pending_opt_proposals: BTreeMap::new(),
             opt_proposal_loopback_tx,
+            pending_proxy_blocks: None,
+            proxy_event_tx,
         }
     }
 
@@ -1945,6 +1954,8 @@ impl RoundManager {
             .insert_quorum_cert(&qc, &mut self.create_block_retriever(preferred_peer))
             .await
             .context("[RoundManager] Failed to process a newly aggregated QC");
+        // Notify proxy consensus of new QC
+        self.notify_proxy_of_qc(qc);
         self.process_certificates().await?;
         result
     }
@@ -2021,10 +2032,113 @@ impl RoundManager {
     ) -> anyhow::Result<()> {
         let result = self
             .block_store
-            .insert_2chain_timeout_certificate(tc)
+            .insert_2chain_timeout_certificate(tc.clone())
             .context("[RoundManager] Failed to process a newly aggregated 2-chain TC");
+        // Notify proxy consensus of new TC
+        self.notify_proxy_of_tc(tc);
         self.process_certificates().await?;
         result
+    }
+
+    // ============================================================================
+    // Proxy Consensus Integration
+    // ============================================================================
+
+    /// Process ordered proxy blocks message from proxy consensus.
+    ///
+    /// This message contains proxy blocks that have been ordered by proxy consensus
+    /// and are ready to be included in a primary block.
+    async fn process_ordered_proxy_blocks_msg(
+        &mut self,
+        msg: OrderedProxyBlocksMsg,
+    ) -> anyhow::Result<()> {
+        let primary_round = msg.primary_round();
+        let num_blocks = msg.proxy_blocks().len();
+
+        info!(
+            self.new_log(LogEvent::ReceiveNewCertificate),
+            "Received {} ordered proxy blocks for primary round {}",
+            num_blocks,
+            primary_round,
+        );
+
+        // Convert to PrimaryBlockFromProxy
+        let primary_block_from_proxy = PrimaryBlockFromProxy::from_ordered_msg(msg)
+            .context("[RoundManager] Failed to parse ordered proxy blocks")?;
+
+        // Verify the proxy blocks (signature verification)
+        // TODO: Use proxy verifier instead of primary verifier in production
+        primary_block_from_proxy
+            .verify(&self.epoch_state.verifier)
+            .context("[RoundManager] Failed to verify ordered proxy blocks")?;
+
+        info!(
+            self.new_log(LogEvent::ReceiveNewCertificate),
+            "Verified {} proxy blocks for primary round {}, payload hash: {}",
+            primary_block_from_proxy.num_blocks(),
+            primary_block_from_proxy.primary_round(),
+            primary_block_from_proxy.aggregated_payload_hash(),
+        );
+
+        // Store the pending proxy blocks
+        // In Phase 1, we simply store the latest one; future work may queue multiple
+        self.pending_proxy_blocks = Some(primary_block_from_proxy);
+
+        Ok(())
+    }
+
+    /// Notify proxy consensus of a newly aggregated QC.
+    ///
+    /// Called when we form a QC, so proxy can attach it to the next proxy block
+    /// and trigger forwarding of ordered blocks.
+    fn notify_proxy_of_qc(&self, qc: Arc<QuorumCert>) {
+        if let Some(ref tx) = self.proxy_event_tx {
+            let event = PrimaryToProxyEvent::NewPrimaryQC(qc.clone());
+            if let Err(e) = tx.send(event) {
+                warn!(
+                    "Failed to notify proxy of new QC (round {}): {}",
+                    qc.certified_block().round(),
+                    e
+                );
+            } else {
+                info!(
+                    "Notified proxy of new QC for round {}",
+                    qc.certified_block().round()
+                );
+            }
+        }
+    }
+
+    /// Notify proxy consensus of a newly aggregated TC.
+    ///
+    /// Called when we form a TC, so proxy knows about timeout events.
+    fn notify_proxy_of_tc(&self, tc: Arc<TwoChainTimeoutCertificate>) {
+        if let Some(ref tx) = self.proxy_event_tx {
+            let event = PrimaryToProxyEvent::NewPrimaryTC(tc.clone());
+            if let Err(e) = tx.send(event) {
+                warn!(
+                    "Failed to notify proxy of new TC (round {}): {}",
+                    tc.round(),
+                    e
+                );
+            } else {
+                info!("Notified proxy of new TC for round {}", tc.round());
+            }
+        }
+    }
+
+    /// Get the pending proxy blocks if available.
+    ///
+    /// This is used by the proposal generator to include proxy blocks in the primary block.
+    pub fn take_pending_proxy_blocks(&mut self) -> Option<PrimaryBlockFromProxy> {
+        self.pending_proxy_blocks.take()
+    }
+
+    /// Check if there are pending proxy blocks for a given primary round.
+    pub fn has_pending_proxy_blocks_for_round(&self, round: Round) -> bool {
+        self.pending_proxy_blocks
+            .as_ref()
+            .is_some_and(|blocks| blocks.primary_round() == round)
     }
 
     /// To jump start new round with the current certificates we have.
@@ -2080,10 +2194,21 @@ impl RoundManager {
         mut buffered_proposal_rx: aptos_channel::Receiver<Author, VerifiedEvent>,
         mut opt_proposal_loopback_rx: aptos_channels::UnboundedReceiver<OptBlockData>,
         close_rx: oneshot::Receiver<oneshot::Sender<()>>,
+        mut proxy_event_rx: Option<TokioMpsc::UnboundedReceiver<ProxyToPrimaryEvent>>,
     ) {
         info!(epoch = self.epoch_state.epoch, "RoundManager started");
         let mut close_rx = close_rx.into_stream();
         loop {
+            // Handle optional proxy events
+            let proxy_event_future = async {
+                if let Some(ref mut rx) = proxy_event_rx {
+                    rx.recv().await
+                } else {
+                    // Never completes if proxy is not enabled
+                    std::future::pending().await
+                }
+            };
+
             tokio::select! {
                 biased;
                 close_req = close_rx.select_next_some() => {
@@ -2091,6 +2216,25 @@ impl RoundManager {
                         ack_sender.send(()).expect("[RoundManager] Fail to ack shutdown");
                     }
                     break;
+                }
+                // Handle proxy consensus events
+                Some(proxy_event) = proxy_event_future => {
+                    let result = match proxy_event {
+                        ProxyToPrimaryEvent::OrderedProxyBlocks(msg) => {
+                            monitor!(
+                                "process_ordered_proxy_blocks",
+                                self.process_ordered_proxy_blocks_msg(msg).await
+                            )
+                        }
+                    };
+                    let round_state = self.round_state();
+                    match result {
+                        Ok(_) => trace!(RoundStateLogSchema::new(round_state)),
+                        Err(e) => {
+                            counters::ERROR_COUNT.inc();
+                            warn!(kind = error_kind(&e), RoundStateLogSchema::new(round_state), "Error handling proxy event: {:#}", e);
+                        }
+                    }
                 }
                 opt_proposal = opt_proposal_loopback_rx.select_next_some() => {
                     self.pending_opt_proposals = self.pending_opt_proposals.split_off(&opt_proposal.round().add(1));

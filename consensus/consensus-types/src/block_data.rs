@@ -5,6 +5,7 @@ use crate::{
     common::{Author, Payload, Round},
     opt_block_data::OptBlockData,
     proposal_ext::{OptBlockBody, ProposalExt},
+    proxy_block_data::{OptProxyBlockBody, OptProxyBlockData},
     quorum_cert::QuorumCert,
     vote_data::VoteData,
 };
@@ -67,6 +68,10 @@ pub enum BlockType {
         parent_block_id: HashValue,
         parents_bitvec: BitVec,
     },
+
+    /// Proxy block for proxy primary consensus.
+    /// Created by proxy validators and aggregated into primary blocks.
+    ProxyBlock(OptProxyBlockBody),
 }
 
 #[derive(Deserialize, Serialize, Clone, Debug, PartialEq, Eq, CryptoHasher)]
@@ -141,6 +146,7 @@ impl BlockData {
             },
             BlockType::ProposalExt(p) => Some(*p.author()),
             BlockType::OptimisticProposal(p) => Some(*p.author()),
+            BlockType::ProxyBlock(p) => Some(*p.author()),
             _ => None,
         }
     }
@@ -171,6 +177,7 @@ impl BlockData {
             },
             BlockType::ProposalExt(p) => p.payload(),
             BlockType::OptimisticProposal(p) => Some(p.payload()),
+            BlockType::ProxyBlock(p) => Some(p.payload()),
             _ => None,
         }
     }
@@ -179,6 +186,7 @@ impl BlockData {
         match &self.block_type {
             BlockType::ProposalExt(p) => p.validator_txns(),
             BlockType::OptimisticProposal(p) => p.validator_txns(),
+            BlockType::ProxyBlock(p) => Some(p.validator_txns()),
             BlockType::Proposal { .. } | BlockType::NilBlock { .. } | BlockType::Genesis => None,
             BlockType::DAGBlock { validator_txns, .. } => Some(validator_txns),
         }
@@ -220,6 +228,26 @@ impl BlockData {
         matches!(self.block_type, BlockType::OptimisticProposal { .. })
     }
 
+    pub fn is_proxy_block(&self) -> bool {
+        matches!(self.block_type, BlockType::ProxyBlock { .. })
+    }
+
+    /// Returns the primary round for proxy blocks.
+    pub fn primary_round(&self) -> Option<Round> {
+        match &self.block_type {
+            BlockType::ProxyBlock(p) => Some(p.primary_round()),
+            _ => None,
+        }
+    }
+
+    /// Returns the primary QC attached to proxy blocks (if any).
+    pub fn primary_qc(&self) -> Option<&QuorumCert> {
+        match &self.block_type {
+            BlockType::ProxyBlock(p) => p.primary_qc(),
+            _ => None,
+        }
+    }
+
     /// the list of consecutive proposers from the immediately preceeding
     /// rounds that didn't produce a successful block
     pub fn failed_authors(&self) -> Option<&Vec<(Round, Author)>> {
@@ -228,7 +256,9 @@ impl BlockData {
             | BlockType::NilBlock { failed_authors, .. }
             | BlockType::DAGBlock { failed_authors, .. } => Some(failed_authors),
             BlockType::ProposalExt(p) => Some(p.failed_authors()),
-            BlockType::OptimisticProposal(_) | BlockType::Genesis => None,
+            BlockType::OptimisticProposal(_) | BlockType::ProxyBlock(_) | BlockType::Genesis => {
+                None
+            },
         }
     }
 
@@ -415,6 +445,28 @@ impl BlockData {
             timestamp_usecs,
             quorum_cert,
             block_type: BlockType::OptimisticProposal(proposal_body),
+        }
+    }
+
+    /// Returns an instance of BlockData by converting the OptProxyBlockData to BlockData
+    /// and adding the parent QC.
+    pub fn new_from_opt_proxy(
+        opt_proxy_block_data: OptProxyBlockData,
+        quorum_cert: QuorumCert,
+    ) -> Self {
+        let OptProxyBlockData {
+            epoch,
+            round,
+            timestamp_usecs,
+            block_body: proxy_body,
+            ..
+        } = opt_proxy_block_data;
+        Self {
+            epoch,
+            round,
+            timestamp_usecs,
+            quorum_cert,
+            block_type: BlockType::ProxyBlock(proxy_body),
         }
     }
 

@@ -21,6 +21,10 @@ use aptos_consensus_types::{
     pipeline::{commit_decision::CommitDecision, commit_vote::CommitVote},
     proof_of_store::{BatchInfo, BatchInfoExt, ProofOfStoreMsg, SignedBatchInfoMsg},
     proposal_msg::ProposalMsg,
+    proxy_messages::{
+        OptProxyProposalMsg, OrderedProxyBlocksMsg, ProxyOrderVoteMsg, ProxyProposalMsg,
+        ProxyVoteMsg,
+    },
     round_timeout::RoundTimeoutMsg,
     sync_info::SyncInfo,
     vote_msg::VoteMsg,
@@ -102,6 +106,18 @@ pub enum ConsensusMsg {
     ProofOfStoreMsgV2(Box<ProofOfStoreMsg<BatchInfoExt>>),
     /// Secret share message: Used to share secrets per consensus round
     SecretShareMsg(SecretShareNetworkMessage),
+
+    // Proxy Primary Consensus Messages
+    /// ProxyProposalMsg contains a proxy block proposal with parent QC.
+    ProxyProposalMsg(Box<ProxyProposalMsg>),
+    /// OptProxyProposalMsg contains an optimistic proxy proposal (grandparent QC only).
+    OptProxyProposalMsg(Box<OptProxyProposalMsg>),
+    /// ProxyVoteMsg is sent by proxy validators in response to proxy proposals.
+    ProxyVoteMsg(Box<ProxyVoteMsg>),
+    /// ProxyOrderVoteMsg is sent when a proxy validator receives QC on a proxy block.
+    ProxyOrderVoteMsg(Box<ProxyOrderVoteMsg>),
+    /// OrderedProxyBlocksMsg is broadcast to all primaries when proxy blocks are ordered.
+    OrderedProxyBlocksMsg(Box<OrderedProxyBlocksMsg>),
 }
 
 /// Network type for consensus
@@ -136,6 +152,12 @@ impl ConsensusMsg {
             ConsensusMsg::SignedBatchInfoMsgV2(_) => "SignedBatchInfoMsgV2",
             ConsensusMsg::ProofOfStoreMsgV2(_) => "ProofOfStoreMsgV2",
             ConsensusMsg::SecretShareMsg(_) => "SecretShareMsg",
+            // Proxy Primary Consensus Messages
+            ConsensusMsg::ProxyProposalMsg(_) => "ProxyProposalMsg",
+            ConsensusMsg::OptProxyProposalMsg(_) => "OptProxyProposalMsg",
+            ConsensusMsg::ProxyVoteMsg(_) => "ProxyVoteMsg",
+            ConsensusMsg::ProxyOrderVoteMsg(_) => "ProxyOrderVoteMsg",
+            ConsensusMsg::OrderedProxyBlocksMsg(_) => "OrderedProxyBlocksMsg",
         }
     }
 }

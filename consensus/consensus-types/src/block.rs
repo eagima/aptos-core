@@ -459,6 +459,22 @@ impl Block {
                 res1?;
                 res2
             },
+            BlockType::ProxyBlock(p) => {
+                // Proxy block is similar to optimistic proposal - not signed by proposer
+                // Verify grandparent QC and parent QC
+                let (res1, res2) = rayon::join(
+                    || p.grandparent_qc().verify(validator),
+                    || self.quorum_cert().verify(validator),
+                );
+                res1?;
+                // Also verify attached primary QC if present
+                if let Some(primary_qc) = p.primary_qc() {
+                    // Note: Primary QC may be verified against full validator set,
+                    // but for now verify against same validator set
+                    primary_qc.verify(validator)?;
+                }
+                res2
+            },
             BlockType::DAGBlock { .. } => bail!("We should not accept DAG block from others"),
         }
     }

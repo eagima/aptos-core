@@ -101,6 +101,9 @@ pub struct ConsensusConfig {
     pub enable_round_timeout_msg: bool,
     pub enable_optimistic_proposal_rx: bool,
     pub enable_optimistic_proposal_tx: bool,
+    // Proxy consensus configuration
+    pub enable_proxy_consensus: bool,
+    pub proxy_consensus_config: ProxyConsensusConfig,
 }
 
 /// Deprecated
@@ -108,6 +111,40 @@ pub struct ConsensusConfig {
 pub enum QcAggregatorType {
     #[default]
     NoDelay,
+}
+
+/// Configuration for proxy consensus.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ProxyConsensusConfig {
+    /// Round timeout for proxy consensus in milliseconds
+    pub round_initial_timeout_ms: u64,
+    /// Timeout backoff exponent base
+    pub round_timeout_backoff_exponent_base: f64,
+    /// Maximum backoff exponent
+    pub round_timeout_backoff_max_exponent: usize,
+    /// Maximum proxy blocks per primary round (backpressure)
+    pub max_proxy_blocks_per_primary_round: u64,
+    /// Maximum transactions per proxy block
+    pub max_proxy_block_txns: u64,
+    /// Maximum proxy block size in bytes
+    pub max_proxy_block_bytes: u64,
+}
+
+impl Default for ProxyConsensusConfig {
+    fn default() -> Self {
+        Self {
+            // Proxy runs fast: 100ms initial timeout
+            round_initial_timeout_ms: 100,
+            round_timeout_backoff_exponent_base: 1.2,
+            round_timeout_backoff_max_exponent: 4,
+            // Allow 20 proxy blocks per primary round
+            max_proxy_blocks_per_primary_round: 20,
+            // Smaller proxy blocks for faster consensus
+            max_proxy_block_txns: 500,
+            max_proxy_block_bytes: 1024 * 1024, // 1MB
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -383,6 +420,8 @@ impl Default for ConsensusConfig {
             enable_round_timeout_msg: true,
             enable_optimistic_proposal_rx: true,
             enable_optimistic_proposal_tx: true,
+            enable_proxy_consensus: false,
+            proxy_consensus_config: ProxyConsensusConfig::default(),
         }
     }
 }

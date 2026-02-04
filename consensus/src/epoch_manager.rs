@@ -969,6 +969,29 @@ impl<P: OnChainConfigProvider> EpochManager<P> {
             .config
             .max_blocks_per_receiving_request(onchain_consensus_config.quorum_store_enabled());
 
+        // Create proxy consensus channels if enabled
+        let (proxy_event_tx, proxy_event_rx) = if self.config.enable_proxy_consensus {
+            let (primary_to_proxy_tx, _primary_to_proxy_rx) =
+                tokio::sync::mpsc::unbounded_channel();
+            let (_proxy_to_primary_tx, proxy_to_primary_rx) =
+                tokio::sync::mpsc::unbounded_channel();
+
+            info!(
+                epoch = epoch,
+                "Proxy consensus enabled, creating channels for primary-proxy communication"
+            );
+
+            // TODO: Spawn ProxyRoundManager here when full implementation is ready
+            // ProxyRoundManager would be spawned with:
+            // - primary_to_proxy_rx to receive QC/TC updates from primary
+            // - proxy_to_primary_tx to send ordered proxy blocks to primary
+            // For now, we just create the channels and pass to RoundManager
+
+            (Some(primary_to_proxy_tx), Some(proxy_to_primary_rx))
+        } else {
+            (None, None)
+        };
+
         let mut round_manager = RoundManager::new(
             epoch_state,
             block_store.clone(),
@@ -987,7 +1010,7 @@ impl<P: OnChainConfigProvider> EpochManager<P> {
             fast_rand_config,
             failures_tracker,
             opt_proposal_loopback_tx,
-            None, // proxy_event_tx: TODO: Initialize when proxy consensus is enabled
+            proxy_event_tx,
         );
 
         round_manager.init(last_vote).await;
@@ -999,7 +1022,7 @@ impl<P: OnChainConfigProvider> EpochManager<P> {
             buffered_proposal_rx,
             opt_proposal_loopback_rx,
             close_rx,
-            None, // proxy_event_rx: TODO: Initialize when proxy consensus is enabled
+            proxy_event_rx,
         ));
 
         self.spawn_block_retrieval_task(epoch, block_store, max_blocks_allowed);

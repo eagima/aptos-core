@@ -70,7 +70,7 @@ use move_command_line_common::{address::NumericalAddress, env::MOVE_HOME};
 use move_core_types::{
     identifier::Identifier,
     int256::{I256, U256},
-    language_storage::{ModuleId, StructTag},
+    language_storage::{ModuleId, StructTag, MODULE_SEPARATOR},
 };
 use move_model::metadata::{CompilerVersion, LanguageVersion};
 use move_package::{source_package::layout::SourcePackageLayout, BuildConfig, CompilerConfig};
@@ -2210,22 +2210,10 @@ impl CliCommand<TransactionSummary> for RunFunction {
     }
 
     async fn execute(self) -> CliTypedResult<TransactionSummary> {
-        // Check if we need to use async parsing for struct/enum arguments
-        let entry_function = if self.entry_function_args.json_file.is_some() {
-            // Get REST client for async parsing
-            let rest_client = self
-                .txn_options
-                .rest_options
-                .client(&self.txn_options.profile_options)?;
-
-            // Use async parsing that supports struct/enum arguments
-            self.entry_function_args
-                .try_into_entry_function_async(&rest_client)
-                .await?
-        } else {
-            // Use synchronous parsing for command-line arguments
-            self.entry_function_args.try_into()?
-        };
+        let entry_function = self
+            .entry_function_args
+            .parse_with_optional_client(|| self.txn_options.rest_client())
+            .await?;
 
         dispatch_transaction(
             TransactionPayload::EntryFunction(entry_function),
@@ -2262,19 +2250,10 @@ impl CliCommand<TransactionSummary> for Simulate {
     }
 
     async fn execute(self) -> CliTypedResult<TransactionSummary> {
-        // Check if we need to use async parsing for struct/enum arguments
-        let entry_function = if self.entry_function_args.json_file.is_some() {
-            // Get REST client for async parsing
-            let rest_client = self.txn_options.rest_client()?;
-
-            // Use async parsing that supports struct/enum arguments
-            self.entry_function_args
-                .try_into_entry_function_async(&rest_client)
-                .await?
-        } else {
-            // Use synchronous parsing for command-line arguments
-            self.entry_function_args.try_into()?
-        };
+        let entry_function = self
+            .entry_function_args
+            .parse_with_optional_client(|| self.txn_options.rest_client())
+            .await?;
 
         let payload = TransactionPayload::EntryFunction(entry_function);
 
@@ -2303,9 +2282,18 @@ impl CliCommand<Vec<serde_json::Value>> for ViewFunction {
     }
 
     async fn execute(self) -> CliTypedResult<Vec<serde_json::Value>> {
-        self.txn_options
-            .view(self.entry_function_args.try_into()?)
-            .await
+        let view_function = if self.entry_function_args.json_file.is_some() {
+            // Use async parsing that supports struct/enum arguments
+            let rest_client = self.txn_options.rest_client()?;
+            self.entry_function_args
+                .try_into_view_function_async(&rest_client)
+                .await?
+        } else {
+            // Use synchronous parsing for command-line arguments
+            self.entry_function_args.try_into()?
+        };
+
+        self.txn_options.view(view_function).await
     }
 }
 
@@ -2733,7 +2721,7 @@ impl FunctionArgType {
 }
 
 // TODO use from move_binary_format::file_format_common if it is made public.
-fn write_u64_as_uleb128(binary: &mut Vec<u8>, mut val: usize) {
+pub(crate) fn write_u64_as_uleb128(binary: &mut Vec<u8>, mut val: usize) {
     loop {
         let cur = val & 0x7F;
         if cur != val {
@@ -3093,7 +3081,7 @@ pub struct MemberId {
 }
 
 fn parse_member_id(function_id: &str) -> CliTypedResult<MemberId> {
-    let ids: Vec<&str> = function_id.split_terminator("::").collect();
+    let ids: Vec<&str> = function_id.split_terminator(MODULE_SEPARATOR).collect();
     if ids.len() != 3 {
         return Err(CliError::CommandArgumentError(
             "FunctionId is not well formed.  Must be of the form <address>::<module>::<function>"

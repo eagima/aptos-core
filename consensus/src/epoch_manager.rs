@@ -985,10 +985,11 @@ impl<P: OnChainConfigProvider> EpochManager<P> {
                 "Proxy consensus enabled, spawning ProxyRoundManager"
             );
 
-            // Spawn ProxyRoundManager
+            // Spawn ProxyRoundManager with the real network sender
             self.spawn_proxy_round_manager(
                 epoch,
                 epoch_state.clone(),
+                network_sender.clone(),
                 primary_to_proxy_rx,
                 proxy_to_primary_tx,
             );
@@ -1039,6 +1040,7 @@ impl<P: OnChainConfigProvider> EpochManager<P> {
         &self,
         epoch: u64,
         epoch_state: Arc<EpochState>,
+        network_sender: Arc<NetworkSender>,
         primary_to_proxy_rx: tokio::sync::mpsc::UnboundedReceiver<
             aptos_proxy_primary::PrimaryToProxyEvent,
         >,
@@ -1080,11 +1082,9 @@ impl<P: OnChainConfigProvider> EpochManager<P> {
             backpressure_delay_ms: 50,
         };
 
-        // Create a stub network sender for Phase 1
-        // In production, this would be connected to the actual network layer
-        let proxy_network = Arc::new(aptos_proxy_primary::ProxyNetworkSender::new_stub(
-            self.author,
-            proxy_validators.clone(),
+        // Use the real network sender - NetworkSender implements TProxyNetworkSender
+        let proxy_network = Arc::new(aptos_proxy_primary::ProxyNetworkSender::new(
+            network_sender,
         ));
 
         // Create ProxyRoundManager

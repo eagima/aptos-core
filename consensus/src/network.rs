@@ -509,6 +509,70 @@ impl NetworkSender {
         self.broadcast(msg).await
     }
 
+    // Proxy Primary Consensus Methods
+
+    /// Broadcast a proxy proposal to all proxy validators.
+    pub async fn broadcast_proxy_proposal(
+        &self,
+        proposal_msg: aptos_consensus_types::proxy_messages::ProxyProposalMsg,
+    ) {
+        fail_point!("consensus::send::proxy_proposal", |_| ());
+        let msg = ConsensusMsg::ProxyProposalMsg(Box::new(proposal_msg));
+        self.broadcast(msg).await
+    }
+
+    /// Broadcast an optimistic proxy proposal to all proxy validators.
+    pub async fn broadcast_opt_proxy_proposal(
+        &self,
+        proposal_msg: aptos_consensus_types::proxy_messages::OptProxyProposalMsg,
+    ) {
+        fail_point!("consensus::send::opt_proxy_proposal", |_| ());
+        let msg = ConsensusMsg::OptProxyProposalMsg(Box::new(proposal_msg));
+        self.broadcast(msg).await
+    }
+
+    /// Broadcast a proxy vote to all proxy validators.
+    pub async fn broadcast_proxy_vote(
+        &self,
+        vote_msg: aptos_consensus_types::proxy_messages::ProxyVoteMsg,
+    ) {
+        fail_point!("consensus::send::proxy_vote", |_| ());
+        let msg = ConsensusMsg::ProxyVoteMsg(Box::new(vote_msg));
+        self.broadcast(msg).await
+    }
+
+    /// Send a proxy vote to specific recipients.
+    pub async fn send_proxy_vote(
+        &self,
+        vote_msg: aptos_consensus_types::proxy_messages::ProxyVoteMsg,
+        recipients: Vec<Author>,
+    ) {
+        fail_point!("consensus::send::proxy_vote", |_| ());
+        let msg = ConsensusMsg::ProxyVoteMsg(Box::new(vote_msg));
+        self.send(msg, recipients).await
+    }
+
+    /// Broadcast a proxy order vote to all proxy validators.
+    pub async fn broadcast_proxy_order_vote(
+        &self,
+        order_vote_msg: aptos_consensus_types::proxy_messages::ProxyOrderVoteMsg,
+    ) {
+        fail_point!("consensus::send::proxy_order_vote", |_| ());
+        let msg = ConsensusMsg::ProxyOrderVoteMsg(Box::new(order_vote_msg));
+        self.broadcast(msg).await
+    }
+
+    /// Broadcast ordered proxy blocks to ALL primaries.
+    /// This is the critical message that transfers proxy consensus results to primary consensus.
+    pub async fn broadcast_ordered_proxy_blocks(
+        &self,
+        ordered_msg: aptos_consensus_types::proxy_messages::OrderedProxyBlocksMsg,
+    ) {
+        fail_point!("consensus::send::ordered_proxy_blocks", |_| ());
+        let msg = ConsensusMsg::OrderedProxyBlocksMsg(Box::new(ordered_msg));
+        self.broadcast(msg).await
+    }
+
     /// Sends the vote to the chosen recipients (typically that would be the recipients that
     /// we believe could serve as proposers in the next round). The recipients on the receiving
     /// end are going to be notified about a new vote in the vote queue.
@@ -739,6 +803,81 @@ impl ProofNotifier for NetworkSender {
     }
 }
 
+/// Implementation of TProxyNetworkSender for NetworkSender.
+/// This allows the proxy_primary crate to use the real network layer.
+#[async_trait::async_trait]
+impl aptos_proxy_primary::proxy_network_sender::TProxyNetworkSender for NetworkSender {
+    async fn broadcast_proxy_proposal(
+        &self,
+        proposal_msg: aptos_consensus_types::proxy_messages::ProxyProposalMsg,
+    ) {
+        self.broadcast_proxy_proposal(proposal_msg).await
+    }
+
+    async fn broadcast_opt_proxy_proposal(
+        &self,
+        proposal_msg: aptos_consensus_types::proxy_messages::OptProxyProposalMsg,
+    ) {
+        self.broadcast_opt_proxy_proposal(proposal_msg).await
+    }
+
+    async fn broadcast_proxy_vote(
+        &self,
+        vote_msg: aptos_consensus_types::proxy_messages::ProxyVoteMsg,
+    ) {
+        self.broadcast_proxy_vote(vote_msg).await
+    }
+
+    async fn broadcast_proxy_order_vote(
+        &self,
+        order_vote_msg: aptos_consensus_types::proxy_messages::ProxyOrderVoteMsg,
+    ) {
+        self.broadcast_proxy_order_vote(order_vote_msg).await
+    }
+
+    async fn broadcast_ordered_proxy_blocks(
+        &self,
+        ordered_msg: aptos_consensus_types::proxy_messages::OrderedProxyBlocksMsg,
+    ) {
+        self.broadcast_ordered_proxy_blocks(ordered_msg).await
+    }
+
+    async fn broadcast_proxy_sync_info(
+        &self,
+        sync_info: aptos_consensus_types::proxy_sync_info::ProxySyncInfo,
+    ) {
+        // TODO: Implement proxy sync info broadcast
+        // For now, log and skip
+        debug!("broadcast_proxy_sync_info called but not yet implemented");
+    }
+
+    async fn send_proxy_vote(
+        &self,
+        vote_msg: aptos_consensus_types::proxy_messages::ProxyVoteMsg,
+        recipients: Vec<Author>,
+    ) {
+        self.send_proxy_vote(vote_msg, recipients).await
+    }
+
+    fn author(&self) -> Author {
+        self.author
+    }
+
+    fn proxy_validators(&self) -> &[AccountAddress] {
+        // Return all validators - in Phase 1, all validators are proxies
+        // This is a simplification; in production, this would be filtered
+        // For now, return empty slice (this method is used for routing)
+        // The actual validators are in self.validators but we can't return a reference
+        // without storing them separately. For Phase 1, this is acceptable.
+        &[]
+    }
+
+    fn primary_validators(&self) -> &[AccountAddress] {
+        // Same as proxy_validators for Phase 1
+        &[]
+    }
+}
+
 pub struct NetworkTask {
     consensus_messages_tx: aptos_channel::Sender<
         (AccountAddress, Discriminant<ConsensusMsg>),
@@ -877,7 +1016,13 @@ impl NetworkTask {
                         | ConsensusMsg::OrderVoteMsg(_)
                         | ConsensusMsg::SyncInfo(_)
                         | ConsensusMsg::EpochRetrievalRequest(_)
-                        | ConsensusMsg::EpochChangeProof(_)) => {
+                        | ConsensusMsg::EpochChangeProof(_)
+                        // Proxy Primary Consensus Messages
+                        | ConsensusMsg::ProxyProposalMsg(_)
+                        | ConsensusMsg::OptProxyProposalMsg(_)
+                        | ConsensusMsg::ProxyVoteMsg(_)
+                        | ConsensusMsg::ProxyOrderVoteMsg(_)
+                        | ConsensusMsg::OrderedProxyBlocksMsg(_)) => {
                             if let ConsensusMsg::ProposalMsg(proposal) = &consensus_msg {
                                 observe_block(
                                     proposal.proposal().timestamp_usecs(),

@@ -27,14 +27,16 @@ use aptos_consensus_types::{
     common::{Author, Round},
     order_vote::OrderVote,
     order_vote_proposal::OrderVoteProposal,
+    pipelined_block::{OrderedBlockWindow, PipelinedBlock},
     proxy_messages::{
         OrderedProxyBlocksMsg, ProxyOrderVoteMsg, ProxyProposalMsg, ProxyVoteMsg,
     },
-    proxy_sync_info::ProxySyncInfo,
     quorum_cert::QuorumCert,
     timeout_2chain::TwoChainTimeoutCertificate,
     vote_data::VoteData,
+    vote_proposal::VoteProposal,
 };
+use aptos_types::proof::AccumulatorExtensionProof;
 use aptos_crypto::{hash::CryptoHash, HashValue};
 use aptos_infallible::Mutex;
 use aptos_logger::prelude::*;
@@ -251,17 +253,16 @@ impl ProxyRoundManager {
 
     /// Process a proxy proposal message.
     ///
-    /// This is a stub implementation for Phase 1.
-    /// Full implementation will include:
-    /// - Signature verification
-    /// - Block insertion
-    /// - Vote generation
+    /// Handles incoming proposals by:
+    /// 1. Verifying the proposal signature
+    /// 2. Inserting the block into proxy block store
+    /// 3. Signing a vote and sending to the next leader
     pub async fn process_proxy_proposal_msg(
         &mut self,
         proposal_msg: ProxyProposalMsg,
         sender: Author,
     ) -> Result<(), ProxyConsensusError> {
-        let proposal = proposal_msg.proposal();
+        let proposal = proposal_msg.proposal().clone();
         let round = proposal.round();
 
         debug!(
@@ -269,7 +270,7 @@ impl ProxyRoundManager {
             round, sender
         );
 
-        // Verify round is valid
+        // Verify round is valid (must be higher than current)
         if round <= self.current_round {
             return Err(ProxyConsensusError::RoundTooOld {
                 round,
@@ -277,14 +278,67 @@ impl ProxyRoundManager {
             });
         }
 
+        // Verify proposal signature
+        proposal
+            .validate_signature(&self.epoch_state.verifier)
+            .map_err(|e| {
+                ProxyConsensusError::InvalidProxyBlock(format!("Invalid signature: {:?}", e))
+            })?;
+
         // Update current round
         self.current_round = round;
         proxy_metrics::PROXY_CURRENT_ROUND.set(round as i64);
 
-        // TODO: Insert block into store and vote on it
-        // This requires proper VoteProposal construction which depends on
-        // execution state that we don't have in proxy consensus.
-        // For Phase 1, we'll implement the skeleton and fill in details.
+        // Create PipelinedBlock and insert into block store
+        // For proxy consensus, we don't execute blocks, so we use a simplified PipelinedBlock
+        let pipelined_block =
+            PipelinedBlock::new_ordered(proposal.clone(), OrderedBlockWindow::empty());
+        self.block_store.insert_block(Arc::new(pipelined_block))?;
+
+        // Create VoteProposal for signing
+        // Use decoupled_execution=true since proxy consensus doesn't execute blocks
+        // Create an empty accumulator extension proof (ordering only, no execution)
+        let accumulator_extension_proof = AccumulatorExtensionProof::new(vec![], 0, vec![]);
+
+        let vote_proposal = VoteProposal::new(
+            accumulator_extension_proof,
+            proposal.clone(),
+            None, // next_epoch_state - not handling epoch changes in Phase 1
+            true, // decoupled_execution - ordering only without execution
+        );
+
+        // Get TC if available (for 2-chain voting rules)
+        let tc: Option<&TwoChainTimeoutCertificate> = None;
+
+        // Sign vote using safety rules
+        let vote = self
+            .safety_rules
+            .lock()
+            .construct_and_sign_proxy_vote(&vote_proposal, tc)?;
+
+        // Get sync info and create vote message
+        let sync_info = self.block_store.proxy_sync_info();
+        let vote_msg = ProxyVoteMsg::new(vote, sync_info);
+
+        // Determine next leader and send vote
+        let next_round = round + 1;
+        let next_leader = self.leader_election.get_leader(next_round);
+
+        // Send vote to next leader (or broadcast if we are the next leader)
+        if next_leader == self.author {
+            // We are the next leader, broadcast to all so they can see our vote
+            self.network.broadcast_proxy_vote(vote_msg).await;
+        } else {
+            // Send to next leader
+            self.network
+                .send_proxy_vote(vote_msg, vec![next_leader])
+                .await;
+        }
+
+        debug!(
+            "ProxyRoundManager: voted on proposal for round {}, sent to next leader {:?}",
+            round, next_leader
+        );
 
         Ok(())
     }

@@ -25,18 +25,23 @@ use aptos_consensus_types::{
     block::Block,
     common::{Author, Round},
     order_vote::OrderVote,
+    order_vote_proposal::OrderVoteProposal,
     proxy_messages::{
         OrderedProxyBlocksMsg, ProxyOrderVoteMsg, ProxyProposalMsg, ProxyVoteMsg,
     },
     quorum_cert::QuorumCert,
     timeout_2chain::TwoChainTimeoutCertificate,
-    vote::Vote,
+    vote_data::VoteData,
 };
-use aptos_crypto::HashValue;
+use aptos_crypto::{hash::CryptoHash, HashValue};
 use aptos_infallible::Mutex;
 use aptos_logger::prelude::*;
 use aptos_time_service::TimeService;
-use aptos_types::{epoch_state::EpochState, validator_verifier::ValidatorVerifier};
+use aptos_types::{
+    epoch_state::EpochState,
+    ledger_info::{LedgerInfo, LedgerInfoWithSignatures, SignatureAggregator},
+    validator_verifier::ValidatorVerifier,
+};
 use std::{collections::HashMap, sync::Arc, time::Duration};
 use tokio::sync::mpsc;
 
@@ -110,7 +115,8 @@ pub struct ProxyRoundManager {
     author: Author,
 
     /// Pending votes being aggregated for QC formation
-    pending_votes: HashMap<HashValue, Vec<Vote>>,
+    /// Key: ledger_info digest, Value: (VoteData, SignatureAggregator)
+    pending_votes: HashMap<HashValue, (VoteData, SignatureAggregator<LedgerInfo>)>,
     /// Pending order votes being aggregated
     pending_order_votes: HashMap<HashValue, Vec<OrderVote>>,
 
@@ -247,7 +253,8 @@ impl ProxyRoundManager {
 
     /// Process a proxy vote message.
     ///
-    /// This is a stub implementation for Phase 1.
+    /// Aggregates votes and forms QC when quorum is reached.
+    /// After QC formation, broadcasts order vote.
     pub async fn process_proxy_vote_msg(
         &mut self,
         vote_msg: ProxyVoteMsg,
@@ -255,7 +262,7 @@ impl ProxyRoundManager {
         _primary_tx: &mpsc::UnboundedSender<ProxyToPrimaryEvent>,
     ) -> Result<(), ProxyConsensusError> {
         let vote = vote_msg.vote();
-        let block_id = vote.vote_data().proposed().id();
+        let li_digest = vote.ledger_info().hash();
         let round = vote.vote_data().proposed().round();
 
         debug!(
@@ -263,36 +270,120 @@ impl ProxyRoundManager {
             round, sender
         );
 
-        // Aggregate votes
-        self.pending_votes
-            .entry(block_id)
-            .or_default()
-            .push(vote.clone());
+        // Get the verifier - use direct field access for split borrow
+        let verifier = &self.epoch_state.verifier;
 
-        // Get votes for this block and calculate voting power
-        let verifier = self.proxy_verifier();
-        let quorum_power = verifier.quorum_voting_power() as u128;
+        // Get or create the signature aggregator for this ledger info
+        let (vote_data, sig_aggregator) =
+            self.pending_votes.entry(li_digest).or_insert_with(|| {
+                (
+                    vote.vote_data().clone(),
+                    SignatureAggregator::new(vote.ledger_info().clone()),
+                )
+            });
 
-        let (voting_power, num_votes) = {
-            let votes = self.pending_votes.get(&block_id).unwrap();
-            let power: u128 = votes
-                .iter()
-                .filter_map(|v| verifier.get_voting_power(&v.author()).map(|p| p as u128))
-                .sum();
-            (power, votes.len())
-        };
+        // Add the signature from this vote
+        sig_aggregator.add_signature(vote.author(), vote.signature_with_status());
 
-        if voting_power >= quorum_power {
-            debug!(
-                "ProxyRoundManager: formed QC for round {} with {} votes",
-                round, num_votes
-            );
+        // Check if we have enough voting power for a QC
+        match sig_aggregator.check_voting_power(verifier, true) {
+            Ok(_voting_power) => {
+                // We have quorum! Form the QC
+                info!(
+                    "ProxyRoundManager: formed QC for round {} with quorum",
+                    round
+                );
 
-            // TODO: Form QC and proceed to order vote
-            // This requires proper signature aggregation
+                // Clone vote_data before aggregation so we can use it after removing from pending_votes
+                let vote_data_clone = vote_data.clone();
 
-            // Clean up pending votes
-            self.pending_votes.remove(&block_id);
+                // Aggregate signatures and create LedgerInfoWithSignatures
+                match sig_aggregator.aggregate_and_verify(verifier) {
+                    Ok((ledger_info, aggregated_sig)) => {
+                        let li_with_sig =
+                            LedgerInfoWithSignatures::new(ledger_info, aggregated_sig);
+                        let qc = Arc::new(QuorumCert::new(vote_data_clone.clone(), li_with_sig));
+
+                        // Update block store with the new QC
+                        self.block_store.update_highest_proxy_qc((*qc).clone());
+                        proxy_metrics::PROXY_CONSENSUS_QCS_FORMED.inc();
+
+                        // Advance to next round
+                        self.current_round = round + 1;
+                        proxy_metrics::PROXY_CURRENT_ROUND.set(self.current_round as i64);
+
+                        // Clean up pending votes (now we can mutably borrow since vote_data_clone is owned)
+                        self.pending_votes.remove(&li_digest);
+
+                        // Sign and broadcast order vote
+                        let block_id = vote_data_clone.proposed().id();
+                        if let Some(pipelined_block) = self.block_store.get_block(block_id) {
+                            let block = pipelined_block.block().clone();
+                            let block_info = vote_data_clone.proposed().clone();
+
+                            // Create order vote proposal
+                            let order_vote_proposal =
+                                OrderVoteProposal::new(block, block_info, qc.clone());
+
+                            // Sign order vote using safety rules (hold lock briefly, then release)
+                            let order_vote_result = self
+                                .safety_rules
+                                .lock()
+                                .construct_and_sign_proxy_order_vote(&order_vote_proposal);
+
+                            // Now we can await without holding the lock
+                            match order_vote_result {
+                                Ok(order_vote) => {
+                                    // Create order vote message with QC
+                                    let order_vote_msg =
+                                        ProxyOrderVoteMsg::new(order_vote, (*qc).clone());
+
+                                    // Broadcast to all proxy validators
+                                    self.network
+                                        .broadcast_proxy_order_vote(order_vote_msg)
+                                        .await;
+
+                                    debug!(
+                                        "ProxyRoundManager: signed and broadcast order vote for round {}",
+                                        round
+                                    );
+                                },
+                                Err(e) => {
+                                    warn!(
+                                        "ProxyRoundManager: failed to sign order vote for round {}: {:?}",
+                                        round, e
+                                    );
+                                },
+                            }
+                        } else {
+                            warn!(
+                                "ProxyRoundManager: block {} not found for order vote",
+                                block_id
+                            );
+                        }
+
+                        debug!(
+                            "ProxyRoundManager: QC formed for round {}, advancing to round {}",
+                            round, self.current_round
+                        );
+                    },
+                    Err(e) => {
+                        warn!("Error aggregating signatures for QC: {:?}", e);
+                    },
+                }
+            },
+            Err(aptos_types::validator_verifier::VerifyError::TooLittleVotingPower {
+                voting_power,
+                ..
+            }) => {
+                debug!(
+                    "ProxyRoundManager: vote added for round {}, current power: {}",
+                    round, voting_power
+                );
+            },
+            Err(e) => {
+                warn!("Error checking voting power: {:?}", e);
+            },
         }
 
         Ok(())

@@ -185,6 +185,9 @@ pub struct EpochManager<P: OnChainConfigProvider> {
 
     consensus_txn_filter_config: BlockTransactionFilterConfig,
     quorum_store_txn_filter_config: BatchTransactionFilterConfig,
+    // Channel to dispatch incoming proxy messages to ProxyRoundManager
+    proxy_network_tx:
+        Option<tokio::sync::mpsc::UnboundedSender<aptos_proxy_primary::VerifiedProxyEvent>>,
 }
 
 impl<P: OnChainConfigProvider> EpochManager<P> {
@@ -261,6 +264,7 @@ impl<P: OnChainConfigProvider> EpochManager<P> {
             key_storage,
             consensus_txn_filter_config,
             quorum_store_txn_filter_config,
+            proxy_network_tx: None,
         }
     }
 
@@ -979,11 +983,16 @@ impl<P: OnChainConfigProvider> EpochManager<P> {
                 tokio::sync::mpsc::unbounded_channel();
             let (proxy_to_primary_tx, proxy_to_primary_rx) =
                 tokio::sync::mpsc::unbounded_channel();
+            // Network channel for dispatching proxy messages to ProxyRoundManager
+            let (proxy_network_tx, proxy_network_rx) = tokio::sync::mpsc::unbounded_channel();
 
             info!(
                 epoch = epoch,
                 "Proxy consensus enabled, spawning ProxyRoundManager"
             );
+
+            // Store the network sender for dispatching incoming proxy messages
+            self.proxy_network_tx = Some(proxy_network_tx);
 
             // Spawn ProxyRoundManager with the real network sender
             self.spawn_proxy_round_manager(
@@ -992,10 +1001,12 @@ impl<P: OnChainConfigProvider> EpochManager<P> {
                 network_sender.clone(),
                 primary_to_proxy_rx,
                 proxy_to_primary_tx,
+                proxy_network_rx,
             );
 
             (Some(primary_to_proxy_tx), Some(proxy_to_primary_rx))
         } else {
+            self.proxy_network_tx = None;
             (None, None)
         };
 
@@ -1047,6 +1058,7 @@ impl<P: OnChainConfigProvider> EpochManager<P> {
         proxy_to_primary_tx: tokio::sync::mpsc::UnboundedSender<
             aptos_proxy_primary::ProxyToPrimaryEvent,
         >,
+        network_rx: tokio::sync::mpsc::UnboundedReceiver<aptos_proxy_primary::VerifiedProxyEvent>,
     ) {
         // Get proxy validators - for Phase 1, all validators are proxies
         let proxy_validators: Vec<_> = epoch_state
@@ -1111,7 +1123,7 @@ impl<P: OnChainConfigProvider> EpochManager<P> {
         // Spawn the proxy round manager
         tokio::spawn(async move {
             proxy_round_manager
-                .start(primary_to_proxy_rx, proxy_to_primary_tx)
+                .start(primary_to_proxy_rx, proxy_to_primary_tx, network_rx)
                 .await;
         });
     }
@@ -1802,6 +1814,53 @@ impl<P: OnChainConfigProvider> EpochManager<P> {
                     "process_epoch_retrieval",
                     self.process_epoch_retrieval(*request, peer_id)
                 )?;
+            },
+            // Proxy consensus messages - dispatch to ProxyRoundManager
+            ConsensusMsg::ProxyProposalMsg(msg) => {
+                if let Some(ref tx) = self.proxy_network_tx {
+                    let event =
+                        aptos_proxy_primary::VerifiedProxyEvent::ProxyProposalMsg(msg);
+                    if let Err(e) = tx.send(event) {
+                        warn!("Failed to send proxy proposal to ProxyRoundManager: {:?}", e);
+                    }
+                } else {
+                    debug!("Received proxy proposal but proxy consensus is not enabled");
+                }
+            },
+            ConsensusMsg::OptProxyProposalMsg(_msg) => {
+                // TODO: Handle optimistic proxy proposals
+                debug!("Received opt proxy proposal - not yet implemented");
+            },
+            ConsensusMsg::ProxyVoteMsg(msg) => {
+                if let Some(ref tx) = self.proxy_network_tx {
+                    let event = aptos_proxy_primary::VerifiedProxyEvent::ProxyVoteMsg(msg);
+                    if let Err(e) = tx.send(event) {
+                        warn!("Failed to send proxy vote to ProxyRoundManager: {:?}", e);
+                    }
+                } else {
+                    debug!("Received proxy vote but proxy consensus is not enabled");
+                }
+            },
+            ConsensusMsg::ProxyOrderVoteMsg(msg) => {
+                if let Some(ref tx) = self.proxy_network_tx {
+                    let event =
+                        aptos_proxy_primary::VerifiedProxyEvent::ProxyOrderVoteMsg(msg);
+                    if let Err(e) = tx.send(event) {
+                        warn!("Failed to send proxy order vote to ProxyRoundManager: {:?}", e);
+                    }
+                } else {
+                    debug!("Received proxy order vote but proxy consensus is not enabled");
+                }
+            },
+            ConsensusMsg::OrderedProxyBlocksMsg(msg) => {
+                // This message goes to primary RoundManager, not ProxyRoundManager
+                // It will be handled via the proxy_event_rx channel in RoundManager
+                debug!(
+                    "Received OrderedProxyBlocksMsg with {} blocks for primary round {}",
+                    msg.proxy_blocks().len(),
+                    msg.primary_round()
+                );
+                // TODO: Dispatch to RoundManager's proxy event channel if needed
             },
             _ => {
                 bail!("[EpochManager] Unexpected messages: {:?}", msg);

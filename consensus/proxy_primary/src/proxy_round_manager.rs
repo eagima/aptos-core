@@ -472,12 +472,13 @@ impl ProxyRoundManager {
     ///
     /// This is the main entry point for running proxy consensus. It:
     /// 1. Listens for events from primary consensus (QC/TC updates)
-    /// 2. Processes proxy consensus messages from network (TODO: Phase 2)
-    /// 3. Handles round timeouts (TODO: Phase 2)
+    /// 2. Processes proxy consensus messages from network
+    /// 3. Handles round timeouts for leader proposal
     pub async fn start(
         mut self,
         mut primary_rx: mpsc::UnboundedReceiver<PrimaryToProxyEvent>,
         primary_tx: mpsc::UnboundedSender<ProxyToPrimaryEvent>,
+        mut network_rx: mpsc::UnboundedReceiver<VerifiedProxyEvent>,
     ) {
         info!(
             epoch = self.epoch_state.epoch,
@@ -486,6 +487,9 @@ impl ProxyRoundManager {
             initial_primary_round = self.primary_round,
             "ProxyRoundManager starting event loop"
         );
+
+        // Round timeout interval for leader proposal trigger
+        let mut round_timeout = tokio::time::interval(self.config.round_timeout);
 
         loop {
             tokio::select! {
@@ -509,21 +513,70 @@ impl ProxyRoundManager {
                     }
                 }
 
-                // TODO: Phase 2 - Add network message handling
-                // network_msg = self.network_rx.recv() => { ... }
+                // Handle network messages from proxy validators
+                network_event = network_rx.recv() => {
+                    match network_event {
+                        Some(VerifiedProxyEvent::ProxyProposalMsg(msg)) => {
+                            let sender = msg.proposer();
+                            if let Err(e) = self.process_proxy_proposal_msg(*msg, sender).await {
+                                warn!("Error processing proxy proposal: {:?}", e);
+                            }
+                        }
+                        Some(VerifiedProxyEvent::ProxyVoteMsg(msg)) => {
+                            let sender = msg.vote().author();
+                            if let Err(e) = self.process_proxy_vote_msg(*msg, sender, &primary_tx).await {
+                                warn!("Error processing proxy vote: {:?}", e);
+                            }
+                        }
+                        Some(VerifiedProxyEvent::ProxyOrderVoteMsg(msg)) => {
+                            let sender = msg.order_vote().author();
+                            if let Err(e) = self.process_proxy_order_vote_msg(*msg, sender, &primary_tx).await {
+                                warn!("Error processing proxy order vote: {:?}", e);
+                            }
+                        }
+                        None => {
+                            info!("ProxyRoundManager: network channel closed, shutting down");
+                            break;
+                        }
+                    }
+                }
 
-                // TODO: Phase 2 - Add round timeout handling
-                // _ = self.round_timeout.tick() => { ... }
+                // Handle round timeout - trigger leader proposal
+                _ = round_timeout.tick() => {
+                    if let Err(e) = self.process_round_timeout(&primary_tx).await {
+                        debug!("Round timeout processing error: {:?}", e);
+                    }
+                }
             }
         }
-
-        // Use primary_tx to suppress unused warning (will be used in Phase 2)
-        drop(primary_tx);
 
         info!(
             epoch = self.epoch_state.epoch,
             "ProxyRoundManager event loop terminated"
         );
+    }
+
+    /// Process round timeout - if we are the leader, generate and broadcast a proposal.
+    async fn process_round_timeout(
+        &mut self,
+        _primary_tx: &mpsc::UnboundedSender<ProxyToPrimaryEvent>,
+    ) -> Result<(), ProxyConsensusError> {
+        let round = self.current_round;
+
+        // Check if we are the leader for the current round
+        if !self.leader_election.is_leader(round) {
+            return Ok(());
+        }
+
+        // TODO: Generate and broadcast proposal
+        // This requires integration with proxy_proposal_generator
+        // For now, just log that we would propose
+        debug!(
+            "ProxyRoundManager: leader for round {}, would generate proposal",
+            round
+        );
+
+        Ok(())
     }
 }
 
@@ -765,10 +818,11 @@ mod tests {
 
         let (primary_tx, primary_rx) = mpsc::unbounded_channel();
         let (proxy_tx, _proxy_rx) = mpsc::unbounded_channel();
+        let (_network_tx, network_rx) = mpsc::unbounded_channel::<VerifiedProxyEvent>();
 
         // Spawn the event loop
         let handle = tokio::spawn(async move {
-            round_manager.start(primary_rx, proxy_tx).await;
+            round_manager.start(primary_rx, proxy_tx, network_rx).await;
         });
 
         // Send shutdown signal
@@ -813,10 +867,11 @@ mod tests {
 
         let (primary_tx, primary_rx) = mpsc::unbounded_channel();
         let (proxy_tx, _proxy_rx) = mpsc::unbounded_channel();
+        let (_network_tx, network_rx) = mpsc::unbounded_channel::<VerifiedProxyEvent>();
 
         // Spawn the event loop
         let handle = tokio::spawn(async move {
-            round_manager.start(primary_rx, proxy_tx).await;
+            round_manager.start(primary_rx, proxy_tx, network_rx).await;
         });
 
         // Send a QC
@@ -872,10 +927,11 @@ mod tests {
 
         let (primary_tx, primary_rx) = mpsc::unbounded_channel();
         let (proxy_tx, _proxy_rx) = mpsc::unbounded_channel();
+        let (_network_tx, network_rx) = mpsc::unbounded_channel::<VerifiedProxyEvent>();
 
         // Spawn the event loop
         let handle = tokio::spawn(async move {
-            round_manager.start(primary_rx, proxy_tx).await;
+            round_manager.start(primary_rx, proxy_tx, network_rx).await;
         });
 
         // Drop the sender to close the channel

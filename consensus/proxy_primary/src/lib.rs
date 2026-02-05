@@ -34,5 +34,6 @@ pub use proxy_leader_election::ProxyLeaderElection;
 pub use proxy_network_sender::ProxyNetworkSender;
 pub use proxy_round_manager::{
     PrimaryToProxyEvent, ProxyRoundManager, ProxyRoundManagerConfig, ProxyToPrimaryEvent,
+    VerifiedProxyEvent,
 };
 pub use proxy_safety_rules::ProxySafetyRules;

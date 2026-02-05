@@ -1099,8 +1099,21 @@ impl<P: OnChainConfigProvider> EpochManager<P> {
             network_sender,
         ));
 
-        // Create ProxyRoundManager
-        let proxy_round_manager = ProxyRoundManager::new(
+        // Create ProxyProposalGenerator with stub payload client for Phase 1
+        let payload_client = Arc::new(aptos_proxy_primary::StubProxyPayloadClient::new());
+        let proposal_generator = Arc::new(aptos_proxy_primary::ProxyProposalGenerator::new(
+            self.author,
+            proxy_block_store.clone(),
+            payload_client,
+            self.aptos_time_service.clone(),
+            aptos_proxy_primary::ProxyBackpressureConfig::default(),
+            1000,   // max_block_txns
+            1000000, // max_block_bytes
+            aptos_types::on_chain_config::ValidatorTxnConfig::default_disabled(),
+        ));
+
+        // Create ProxyRoundManager with proposal generator
+        let proxy_round_manager = ProxyRoundManager::new_with_proposal_generator(
             epoch_state,
             proxy_block_store,
             leader_election,
@@ -1111,6 +1124,7 @@ impl<P: OnChainConfigProvider> EpochManager<P> {
             self.author,
             1, // initial_round
             1, // initial_primary_round
+            proposal_generator,
         );
 
         info!(

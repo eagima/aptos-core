@@ -68,6 +68,36 @@ pub trait TProxyPayloadClient: Send + Sync {
     ) -> anyhow::Result<(Vec<ValidatorTransaction>, Payload)>;
 }
 
+/// Stub payload client for Phase 1 testing.
+/// Returns empty payloads without pulling from mempool.
+pub struct StubProxyPayloadClient;
+
+impl StubProxyPayloadClient {
+    /// Create a new stub payload client.
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Default for StubProxyPayloadClient {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[async_trait::async_trait]
+impl TProxyPayloadClient for StubProxyPayloadClient {
+    async fn pull_proxy_payload(
+        &self,
+        _max_txns: u64,
+        _max_size_bytes: u64,
+        _exclude_filter: PayloadFilter,
+    ) -> anyhow::Result<(Vec<ValidatorTransaction>, Payload)> {
+        // Return empty payload for Phase 1
+        Ok((vec![], Payload::empty(false, false)))
+    }
+}
+
 /// Proposal generator for proxy consensus.
 pub struct ProxyProposalGenerator<B: ProxyBlockReader> {
     /// Our author address

@@ -14,11 +14,12 @@
 //! - Bidirectional communication with primary consensus
 
 use crate::{
-    proxy_block_store::ProxyBlockStore,
+    proxy_block_store::{ProxyBlockReader, ProxyBlockStore},
     proxy_error::ProxyConsensusError,
     proxy_leader_election::ProxyLeaderElection,
     proxy_metrics,
     proxy_network_sender::ProxyNetworkSender,
+    proxy_proposal_generator::ProxyProposalGenerator,
     proxy_safety_rules::ProxySafetyRules,
 };
 use aptos_consensus_types::{
@@ -29,6 +30,7 @@ use aptos_consensus_types::{
     proxy_messages::{
         OrderedProxyBlocksMsg, ProxyOrderVoteMsg, ProxyProposalMsg, ProxyVoteMsg,
     },
+    proxy_sync_info::ProxySyncInfo,
     quorum_cert::QuorumCert,
     timeout_2chain::TwoChainTimeoutCertificate,
     vote_data::VoteData,
@@ -113,6 +115,8 @@ pub struct ProxyRoundManager {
     config: ProxyRoundManagerConfig,
     /// Our author address
     author: Author,
+    /// Proposal generator for creating proxy block proposals
+    proposal_generator: Option<Arc<ProxyProposalGenerator<ProxyBlockStore>>>,
 
     /// Pending votes being aggregated for QC formation
     /// Key: ledger_info digest, Value: (VoteData, SignatureAggregator)
@@ -152,6 +156,40 @@ impl ProxyRoundManager {
             time_service,
             config,
             author,
+            proposal_generator: None,
+            pending_votes: HashMap::new(),
+            pending_order_votes: HashMap::new(),
+            primary_round: initial_primary_round,
+            latest_primary_qc: None,
+            pending_primary_qc: None,
+        }
+    }
+
+    /// Create a new proxy round manager with a proposal generator.
+    pub fn new_with_proposal_generator(
+        epoch_state: Arc<EpochState>,
+        block_store: Arc<ProxyBlockStore>,
+        leader_election: Arc<ProxyLeaderElection>,
+        safety_rules: Arc<Mutex<ProxySafetyRules>>,
+        network: Arc<ProxyNetworkSender>,
+        time_service: TimeService,
+        config: ProxyRoundManagerConfig,
+        author: Author,
+        initial_round: Round,
+        initial_primary_round: Round,
+        proposal_generator: Arc<ProxyProposalGenerator<ProxyBlockStore>>,
+    ) -> Self {
+        Self {
+            epoch_state,
+            block_store,
+            current_round: initial_round,
+            leader_election,
+            safety_rules,
+            network,
+            time_service,
+            config,
+            author,
+            proposal_generator: Some(proposal_generator),
             pending_votes: HashMap::new(),
             pending_order_votes: HashMap::new(),
             primary_round: initial_primary_round,
@@ -659,12 +697,68 @@ impl ProxyRoundManager {
             return Ok(());
         }
 
-        // TODO: Generate and broadcast proposal
-        // This requires integration with proxy_proposal_generator
-        // For now, just log that we would propose
-        debug!(
-            "ProxyRoundManager: leader for round {}, would generate proposal",
+        // Check if we have a proposal generator
+        let proposal_generator = match &self.proposal_generator {
+            Some(pg) => pg.clone(),
+            None => {
+                debug!(
+                    "ProxyRoundManager: leader for round {}, but no proposal generator",
+                    round
+                );
+                return Ok(());
+            },
+        };
+
+        info!(
+            "ProxyRoundManager: leader for round {}, generating proposal",
             round
+        );
+
+        // Get highest proxy QC as the parent QC
+        let hqc = (*self.block_store.highest_proxy_qc()).clone();
+
+        // Check if we should attach a primary QC
+        // Only attach if QC.round == primary_round - 1
+        let primary_qc = self.pending_primary_qc.take().and_then(|pqc| {
+            let expected_qc_round = self.primary_round.saturating_sub(1);
+            if pqc.certified_block().round() == expected_qc_round {
+                Some((*pqc).clone())
+            } else {
+                // Put it back if not the right round
+                self.pending_primary_qc = Some(pqc);
+                None
+            }
+        });
+
+        // Generate proposal using proposal generator
+        let block_data = proposal_generator
+            .generate_proxy_proposal(round, hqc.clone(), self.primary_round, primary_qc)
+            .await?;
+
+        // Sign the proposal using safety rules
+        let signature = self
+            .safety_rules
+            .lock()
+            .sign_proxy_proposal(&block_data)?;
+
+        // Create Block from BlockData and signature
+        let block = Block::new_proposal_from_block_data_and_signature(block_data, signature);
+
+        // Get sync info from block store
+        let sync_info = self.block_store.proxy_sync_info();
+
+        // Create ProxyProposalMsg
+        let proposal_msg = ProxyProposalMsg::new(block.clone(), sync_info);
+
+        // Broadcast proposal to all proxy validators
+        self.network.broadcast_proxy_proposal(proposal_msg).await;
+
+        // Increment round timeout counter for metrics
+        proxy_metrics::PROXY_ROUND_TIMEOUT_COUNT.inc();
+
+        debug!(
+            "ProxyRoundManager: broadcast proposal for round {}, primary_round {}",
+            round, self.primary_round
         );
 
         Ok(())

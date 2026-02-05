@@ -3,8 +3,8 @@
 
 use crate::{
     dkg::{
-        real_dkg::rounding::DKGRounding, DKGSessionMetadata, DKGTrait, MayHaveRoundingSummary,
-        RoundingSummary,
+        randomness_dkg::{DKGSessionMetadata, DKGTrait, MayHaveRoundingSummary, RoundingSummary},
+        real_dkg::rounding::DKGRounding,
     },
     on_chain_config::OnChainRandomnessConfig,
     validator_verifier::{ValidatorConsensusInfo, ValidatorVerifier},
@@ -17,7 +17,8 @@ use aptos_dkg::{
     pvss,
     pvss::{
         traits::{
-            transcript::Aggregatable, AggregatableTranscript, Convert, Reconstructable, Transcript,
+            transcript::{Aggregatable, AggregatableTranscript, Aggregated},
+            Convert, Reconstructable, Transcript,
         },
         Player,
     },
@@ -405,17 +406,20 @@ impl DKGTrait for RealDKG {
         accumulator: &mut Self::Transcript,
         element: Self::Transcript,
     ) {
-        accumulator
-            .main
-            .aggregate_with(&params.pvss_config.wconfig, &element.main)
+        let mut agg = accumulator.main.to_aggregated();
+        agg.aggregate_with(&params.pvss_config.wconfig, &element.main)
             .expect("Transcript aggregation failed");
+        accumulator.main = agg.normalize(); // TODO: this should be updated
         if let (Some(acc), Some(ele), Some(config)) = (
             accumulator.fast.as_mut(),
             element.fast.as_ref(),
             params.pvss_config.fast_wconfig.as_ref(),
         ) {
-            acc.aggregate_with(config, ele)
+            let mut fast_agg = acc.to_aggregated();
+            fast_agg
+                .aggregate_with(config, ele)
                 .expect("Transcript aggregation failed");
+            *acc = fast_agg.normalize(); // TODO: this should be updated
         }
     }
 

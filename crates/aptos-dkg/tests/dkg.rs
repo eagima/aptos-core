@@ -1,7 +1,7 @@
 // Copyright (c) Aptos Foundation
 // Licensed pursuant to the Innovation-Enabling Source Code License, available at https://github.com/aptos-labs/aptos-core/blob/main/LICENSE
 
-use aptos_crypto::{blstrs::random_scalar, hash::CryptoHash, traits::SecretSharingConfig as _};
+use aptos_crypto::{blstrs::random_scalar, hash::CryptoHash, traits::TSecretSharingConfig as _};
 use aptos_dkg::pvss::{
     das::{self, unweighted_protocol},
     insecure_field,
@@ -25,7 +25,7 @@ fn test_dkg_all_unweighted() {
 #[test]
 fn test_dkg_all_weighted() {
     let mut rng = thread_rng();
-    let wcs = test_utils::get_weighted_configs_for_testing();
+    let wcs: Vec<_> = test_utils::get_weighted_configs_for_testing();
     let seed = random_scalar(&mut rng);
 
     aggregatable_dkg::<GenericWeighting<unweighted_protocol::Transcript>>(

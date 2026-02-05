@@ -32,5 +32,7 @@ pub use proxy_block_store::{ProxyBlockReader, ProxyBlockStore};
 pub use proxy_error::ProxyConsensusError;
 pub use proxy_leader_election::ProxyLeaderElection;
 pub use proxy_network_sender::ProxyNetworkSender;
-pub use proxy_round_manager::{PrimaryToProxyEvent, ProxyRoundManager, ProxyToPrimaryEvent};
+pub use proxy_round_manager::{
+    PrimaryToProxyEvent, ProxyRoundManager, ProxyRoundManagerConfig, ProxyToPrimaryEvent,
+};
 pub use proxy_safety_rules::ProxySafetyRules;

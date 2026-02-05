@@ -73,10 +73,101 @@ pub struct ProxyNetworkSender {
     inner: Arc<dyn TProxyNetworkSender>,
 }
 
+/// Stub network sender for Phase 1 testing.
+/// Logs messages but doesn't actually send them over the network.
+struct StubNetworkSender {
+    author: Author,
+    proxy_validators: Vec<AccountAddress>,
+}
+
+impl StubNetworkSender {
+    fn new(author: Author, proxy_validators: Vec<AccountAddress>) -> Self {
+        Self {
+            author,
+            proxy_validators,
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl TProxyNetworkSender for StubNetworkSender {
+    async fn broadcast_proxy_proposal(&self, proposal_msg: ProxyProposalMsg) {
+        debug!(
+            "StubNetworkSender: would broadcast proxy proposal round {}",
+            proposal_msg.proposal().round()
+        );
+    }
+
+    async fn broadcast_opt_proxy_proposal(&self, proposal_msg: OptProxyProposalMsg) {
+        debug!(
+            "StubNetworkSender: would broadcast opt proxy proposal round {}",
+            proposal_msg.block_data().round()
+        );
+    }
+
+    async fn broadcast_proxy_vote(&self, vote_msg: ProxyVoteMsg) {
+        debug!(
+            "StubNetworkSender: would broadcast proxy vote round {}",
+            vote_msg.vote().vote_data().proposed().round()
+        );
+    }
+
+    async fn broadcast_proxy_order_vote(&self, order_vote_msg: ProxyOrderVoteMsg) {
+        debug!(
+            "StubNetworkSender: would broadcast proxy order vote round {}",
+            order_vote_msg.quorum_cert().certified_block().round()
+        );
+    }
+
+    async fn broadcast_ordered_proxy_blocks(&self, ordered_msg: OrderedProxyBlocksMsg) {
+        info!(
+            "StubNetworkSender: would broadcast {} ordered proxy blocks for primary round {}",
+            ordered_msg.proxy_blocks().len(),
+            ordered_msg.primary_round()
+        );
+    }
+
+    async fn broadcast_proxy_sync_info(&self, sync_info: ProxySyncInfo) {
+        debug!(
+            "StubNetworkSender: would broadcast proxy sync info, proxy_qc_round {}",
+            sync_info.highest_proxy_certified_round()
+        );
+    }
+
+    async fn send_proxy_vote(&self, vote_msg: ProxyVoteMsg, recipients: Vec<Author>) {
+        debug!(
+            "StubNetworkSender: would send proxy vote round {} to {} recipients",
+            vote_msg.vote().vote_data().proposed().round(),
+            recipients.len()
+        );
+    }
+
+    fn author(&self) -> Author {
+        self.author
+    }
+
+    fn proxy_validators(&self) -> &[AccountAddress] {
+        &self.proxy_validators
+    }
+
+    fn primary_validators(&self) -> &[AccountAddress] {
+        // For Phase 1, proxies and primaries are the same
+        &self.proxy_validators
+    }
+}
+
 impl ProxyNetworkSender {
     /// Create a new proxy network sender.
     pub fn new(inner: Arc<dyn TProxyNetworkSender>) -> Self {
         Self { inner }
+    }
+
+    /// Create a stub network sender for Phase 1 testing.
+    /// This sender logs messages but doesn't actually send them over the network.
+    pub fn new_stub(author: Author, proxy_validators: Vec<AccountAddress>) -> Self {
+        Self {
+            inner: Arc::new(StubNetworkSender::new(author, proxy_validators)),
+        }
     }
 
     /// Broadcast a proxy proposal to all proxy validators.

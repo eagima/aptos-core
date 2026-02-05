@@ -54,6 +54,10 @@ use crate::{
     round_manager::{RoundManager, UnverifiedEvent, VerifiedEvent},
     util::time_service::TimeService,
 };
+use aptos_proxy_primary::{
+    ProxyBlockStore, ProxyLeaderElection, ProxyRoundManager, ProxyRoundManagerConfig,
+    ProxySafetyRules,
+};
 use anyhow::{anyhow, bail, ensure, Context};
 use aptos_bounded_executor::BoundedExecutor;
 use aptos_channels::{aptos_channel, message_queues::QueueStyle};
@@ -969,23 +973,25 @@ impl<P: OnChainConfigProvider> EpochManager<P> {
             .config
             .max_blocks_per_receiving_request(onchain_consensus_config.quorum_store_enabled());
 
-        // Create proxy consensus channels if enabled
+        // Create proxy consensus channels and spawn ProxyRoundManager if enabled
         let (proxy_event_tx, proxy_event_rx) = if self.config.enable_proxy_consensus {
-            let (primary_to_proxy_tx, _primary_to_proxy_rx) =
+            let (primary_to_proxy_tx, primary_to_proxy_rx) =
                 tokio::sync::mpsc::unbounded_channel();
-            let (_proxy_to_primary_tx, proxy_to_primary_rx) =
+            let (proxy_to_primary_tx, proxy_to_primary_rx) =
                 tokio::sync::mpsc::unbounded_channel();
 
             info!(
                 epoch = epoch,
-                "Proxy consensus enabled, creating channels for primary-proxy communication"
+                "Proxy consensus enabled, spawning ProxyRoundManager"
             );
 
-            // TODO: Spawn ProxyRoundManager here when full implementation is ready
-            // ProxyRoundManager would be spawned with:
-            // - primary_to_proxy_rx to receive QC/TC updates from primary
-            // - proxy_to_primary_tx to send ordered proxy blocks to primary
-            // For now, we just create the channels and pass to RoundManager
+            // Spawn ProxyRoundManager
+            self.spawn_proxy_round_manager(
+                epoch,
+                epoch_state.clone(),
+                primary_to_proxy_rx,
+                proxy_to_primary_tx,
+            );
 
             (Some(primary_to_proxy_tx), Some(proxy_to_primary_rx))
         } else {
@@ -1026,6 +1032,88 @@ impl<P: OnChainConfigProvider> EpochManager<P> {
         ));
 
         self.spawn_block_retrieval_task(epoch, block_store, max_blocks_allowed);
+    }
+
+    /// Spawn the ProxyRoundManager for proxy consensus.
+    fn spawn_proxy_round_manager(
+        &self,
+        epoch: u64,
+        epoch_state: Arc<EpochState>,
+        primary_to_proxy_rx: tokio::sync::mpsc::UnboundedReceiver<
+            aptos_proxy_primary::PrimaryToProxyEvent,
+        >,
+        proxy_to_primary_tx: tokio::sync::mpsc::UnboundedSender<
+            aptos_proxy_primary::ProxyToPrimaryEvent,
+        >,
+    ) {
+        // Get proxy validators - for Phase 1, all validators are proxies
+        let proxy_validators: Vec<_> = epoch_state
+            .verifier
+            .get_ordered_account_addresses_iter()
+            .collect();
+
+        // Create ProxyLeaderElection
+        let leader_election = Arc::new(ProxyLeaderElection::new(
+            proxy_validators.clone(),
+            self.author,
+        ));
+
+        // Create ProxyBlockStore for this epoch
+        let proxy_block_store = Arc::new(ProxyBlockStore::new_for_epoch(epoch));
+
+        // Create ProxySafetyRules
+        // For Phase 1, we create a stub safety rules instance without signing capability
+        // In production, this would use the real validator signer
+        let proxy_safety_rules = Arc::new(aptos_infallible::Mutex::new(
+            ProxySafetyRules::new_stub(self.author, epoch_state.clone()),
+        ));
+
+        // Create ProxyRoundManagerConfig from ConsensusConfig
+        let proxy_config = ProxyRoundManagerConfig {
+            round_timeout: std::time::Duration::from_millis(
+                self.config.proxy_consensus_config.round_initial_timeout_ms,
+            ),
+            max_blocks_per_primary_round: self
+                .config
+                .proxy_consensus_config
+                .max_proxy_blocks_per_primary_round,
+            backpressure_delay_ms: 50,
+        };
+
+        // Create a stub network sender for Phase 1
+        // In production, this would be connected to the actual network layer
+        let proxy_network = Arc::new(aptos_proxy_primary::ProxyNetworkSender::new_stub(
+            self.author,
+            proxy_validators.clone(),
+        ));
+
+        // Create ProxyRoundManager
+        let proxy_round_manager = ProxyRoundManager::new(
+            epoch_state,
+            proxy_block_store,
+            leader_election,
+            proxy_safety_rules,
+            proxy_network,
+            self.aptos_time_service.clone(),
+            proxy_config,
+            self.author,
+            1, // initial_round
+            1, // initial_primary_round
+        );
+
+        info!(
+            epoch = epoch,
+            author = %self.author,
+            num_proxy_validators = proxy_validators.len(),
+            "ProxyRoundManager created, spawning event loop"
+        );
+
+        // Spawn the proxy round manager
+        tokio::spawn(async move {
+            proxy_round_manager
+                .start(primary_to_proxy_rx, proxy_to_primary_tx)
+                .await;
+        });
     }
 
     fn start_quorum_store(&mut self, quorum_store_builder: QuorumStoreBuilder) {

@@ -83,6 +83,61 @@ impl ProxySafetyRules {
         }
     }
 
+    /// Create proxy safety rules from epoch state and a validator signer.
+    ///
+    /// This is the preferred constructor when integrating with EpochManager.
+    pub fn new_with_signer(epoch_state: Arc<EpochState>, signer: ValidatorSigner) -> Self {
+        let author = signer.author();
+        let epoch = epoch_state.epoch;
+
+        let mut storage = Storage::from(InMemoryStorage::new());
+
+        // Initialize owner account
+        storage
+            .set(PROXY_OWNER_ACCOUNT, author)
+            .expect("Failed to set proxy owner account");
+
+        // Initialize safety data for the current epoch
+        let safety_data = SafetyData::new(epoch, 0, 0, 0, None, 0);
+        storage
+            .set(PROXY_SAFETY_DATA, safety_data.clone())
+            .expect("Failed to set initial proxy safety data");
+
+        Self {
+            storage,
+            cached_safety_data: Some(safety_data),
+            validator_signer: Some(signer),
+            epoch_state: Some(epoch_state),
+        }
+    }
+
+    /// Create a stub proxy safety rules for Phase 1 testing.
+    ///
+    /// This version doesn't have a real signer and cannot sign messages,
+    /// but can be used for testing the overall flow.
+    pub fn new_stub(author: Author, epoch_state: Arc<EpochState>) -> Self {
+        let epoch = epoch_state.epoch;
+        let mut storage = Storage::from(InMemoryStorage::new());
+
+        // Initialize owner account
+        storage
+            .set(PROXY_OWNER_ACCOUNT, author)
+            .expect("Failed to set proxy owner account");
+
+        // Initialize safety data for the current epoch
+        let safety_data = SafetyData::new(epoch, 0, 0, 0, None, 0);
+        storage
+            .set(PROXY_SAFETY_DATA, safety_data.clone())
+            .expect("Failed to set initial proxy safety data");
+
+        Self {
+            storage,
+            cached_safety_data: Some(safety_data),
+            validator_signer: None, // No signer for stub
+            epoch_state: Some(epoch_state),
+        }
+    }
+
     /// Initialize proxy safety rules for a new epoch.
     ///
     /// Unlike primary SafetyRules which uses EpochChangeProof, proxy safety rules

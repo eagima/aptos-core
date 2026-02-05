@@ -467,6 +467,64 @@ impl ProxyRoundManager {
     pub fn config(&self) -> &ProxyRoundManagerConfig {
         &self.config
     }
+
+    /// Start the proxy round manager event loop.
+    ///
+    /// This is the main entry point for running proxy consensus. It:
+    /// 1. Listens for events from primary consensus (QC/TC updates)
+    /// 2. Processes proxy consensus messages from network (TODO: Phase 2)
+    /// 3. Handles round timeouts (TODO: Phase 2)
+    pub async fn start(
+        mut self,
+        mut primary_rx: mpsc::UnboundedReceiver<PrimaryToProxyEvent>,
+        primary_tx: mpsc::UnboundedSender<ProxyToPrimaryEvent>,
+    ) {
+        info!(
+            epoch = self.epoch_state.epoch,
+            author = %self.author,
+            initial_round = self.current_round,
+            initial_primary_round = self.primary_round,
+            "ProxyRoundManager starting event loop"
+        );
+
+        loop {
+            tokio::select! {
+                // Handle events from primary consensus
+                event = primary_rx.recv() => {
+                    match event {
+                        Some(PrimaryToProxyEvent::NewPrimaryQC(qc)) => {
+                            self.process_primary_qc(qc);
+                        }
+                        Some(PrimaryToProxyEvent::NewPrimaryTC(tc)) => {
+                            self.process_primary_tc(tc);
+                        }
+                        Some(PrimaryToProxyEvent::Shutdown) => {
+                            info!("ProxyRoundManager received shutdown signal");
+                            break;
+                        }
+                        None => {
+                            info!("ProxyRoundManager: primary channel closed, shutting down");
+                            break;
+                        }
+                    }
+                }
+
+                // TODO: Phase 2 - Add network message handling
+                // network_msg = self.network_rx.recv() => { ... }
+
+                // TODO: Phase 2 - Add round timeout handling
+                // _ = self.round_timeout.tick() => { ... }
+            }
+        }
+
+        // Use primary_tx to suppress unused warning (will be used in Phase 2)
+        drop(primary_tx);
+
+        info!(
+            epoch = self.epoch_state.epoch,
+            "ProxyRoundManager event loop terminated"
+        );
+    }
 }
 
 #[cfg(test)]

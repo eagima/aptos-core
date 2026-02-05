@@ -530,6 +530,69 @@ impl ProxyRoundManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{
+        ProxyBlockReader, ProxyBlockStore, ProxyLeaderElection, ProxyNetworkSender,
+        ProxySafetyRules,
+    };
+    use aptos_consensus_types::vote_data::VoteData;
+    use aptos_types::{
+        aggregate_signature::AggregateSignature,
+        block_info::BlockInfo,
+        ledger_info::{LedgerInfo, LedgerInfoWithSignatures},
+        validator_verifier::random_validator_verifier,
+    };
+
+    fn make_test_qc(epoch: u64, round: Round) -> QuorumCert {
+        let block_info =
+            BlockInfo::new(epoch, round, HashValue::random(), HashValue::random(), 0, 0, None);
+        let vote_data = VoteData::new(block_info.clone(), block_info);
+        let ledger_info = LedgerInfo::new(BlockInfo::empty(), HashValue::zero());
+        let li_sig = LedgerInfoWithSignatures::new(ledger_info, AggregateSignature::empty());
+        QuorumCert::new(vote_data, li_sig)
+    }
+
+    fn create_test_round_manager() -> (
+        ProxyRoundManager,
+        mpsc::UnboundedSender<PrimaryToProxyEvent>,
+        mpsc::UnboundedReceiver<ProxyToPrimaryEvent>,
+    ) {
+        let (signers, verifier) = random_validator_verifier(4, None, true);
+        let author = signers[0].author();
+        let epoch = 1;
+
+        let epoch_state = Arc::new(EpochState::new(epoch, verifier.into()));
+
+        let proxy_validators: Vec<_> = signers.iter().map(|s| s.author()).collect();
+        let leader_election = Arc::new(ProxyLeaderElection::new(proxy_validators.clone(), author));
+        let block_store = Arc::new(ProxyBlockStore::new_for_epoch(epoch));
+        let safety_rules = Arc::new(Mutex::new(ProxySafetyRules::new_stub(
+            author,
+            epoch_state.clone(),
+        )));
+        let network = Arc::new(ProxyNetworkSender::new_stub(author, proxy_validators));
+        let time_service = TimeService::real();
+        let config = ProxyRoundManagerConfig::default();
+
+        let round_manager = ProxyRoundManager::new(
+            epoch_state,
+            block_store,
+            leader_election,
+            safety_rules,
+            network,
+            time_service,
+            config,
+            author,
+            1, // initial_round
+            1, // initial_primary_round
+        );
+
+        let (primary_to_proxy_tx, _primary_to_proxy_rx) =
+            mpsc::unbounded_channel::<PrimaryToProxyEvent>();
+        let (_proxy_to_primary_tx, proxy_to_primary_rx) =
+            mpsc::unbounded_channel::<ProxyToPrimaryEvent>();
+
+        (round_manager, primary_to_proxy_tx, proxy_to_primary_rx)
+    }
 
     #[test]
     fn test_proxy_round_manager_config_default() {
@@ -537,5 +600,289 @@ mod tests {
         assert_eq!(config.round_timeout, Duration::from_millis(1000));
         assert_eq!(config.max_blocks_per_primary_round, 20);
         assert_eq!(config.backpressure_delay_ms, 50);
+    }
+
+    #[test]
+    fn test_proxy_round_manager_creation() {
+        let (signers, verifier) = random_validator_verifier(4, None, true);
+        let author = signers[0].author();
+        let epoch = 1;
+
+        let epoch_state = Arc::new(EpochState::new(epoch, verifier.into()));
+
+        let proxy_validators: Vec<_> = signers.iter().map(|s| s.author()).collect();
+        let leader_election = Arc::new(ProxyLeaderElection::new(proxy_validators.clone(), author));
+        let block_store = Arc::new(ProxyBlockStore::new_for_epoch(epoch));
+        let safety_rules = Arc::new(Mutex::new(ProxySafetyRules::new_stub(
+            author,
+            epoch_state.clone(),
+        )));
+        let network = Arc::new(ProxyNetworkSender::new_stub(author, proxy_validators));
+        let time_service = TimeService::real();
+        let config = ProxyRoundManagerConfig::default();
+
+        let round_manager = ProxyRoundManager::new(
+            epoch_state.clone(),
+            block_store,
+            leader_election,
+            safety_rules,
+            network,
+            time_service,
+            config,
+            author,
+            1, // initial_round
+            1, // initial_primary_round
+        );
+
+        assert_eq!(round_manager.current_round(), 1);
+        assert_eq!(round_manager.current_primary_round(), 1);
+        assert_eq!(round_manager.epoch_state().epoch, epoch);
+    }
+
+    #[test]
+    fn test_process_primary_qc() {
+        let (signers, verifier) = random_validator_verifier(4, None, true);
+        let author = signers[0].author();
+        let epoch = 1;
+
+        let epoch_state = Arc::new(EpochState::new(epoch, verifier.into()));
+
+        let proxy_validators: Vec<_> = signers.iter().map(|s| s.author()).collect();
+        let leader_election = Arc::new(ProxyLeaderElection::new(proxy_validators.clone(), author));
+        let block_store = Arc::new(ProxyBlockStore::new_for_epoch(epoch));
+        let safety_rules = Arc::new(Mutex::new(ProxySafetyRules::new_stub(
+            author,
+            epoch_state.clone(),
+        )));
+        let network = Arc::new(ProxyNetworkSender::new_stub(author, proxy_validators));
+        let time_service = TimeService::real();
+        let config = ProxyRoundManagerConfig::default();
+
+        let mut round_manager = ProxyRoundManager::new(
+            epoch_state,
+            block_store,
+            leader_election,
+            safety_rules,
+            network,
+            time_service,
+            config,
+            author,
+            1, // initial_round
+            1, // initial_primary_round
+        );
+
+        // Process a QC for round 5
+        let qc = Arc::new(make_test_qc(epoch, 5));
+        round_manager.process_primary_qc(qc);
+
+        // Primary round should advance to QC.round + 1 = 6
+        assert_eq!(round_manager.current_primary_round(), 6);
+        assert!(round_manager.should_attach_primary_qc());
+
+        // Take the pending QC
+        let pending_qc = round_manager.take_pending_primary_qc();
+        assert!(pending_qc.is_some());
+        assert_eq!(pending_qc.unwrap().certified_block().round(), 5);
+
+        // Should no longer have pending QC
+        assert!(!round_manager.should_attach_primary_qc());
+    }
+
+    #[test]
+    fn test_process_primary_qc_does_not_go_backwards() {
+        let (signers, verifier) = random_validator_verifier(4, None, true);
+        let author = signers[0].author();
+        let epoch = 1;
+
+        let epoch_state = Arc::new(EpochState::new(epoch, verifier.into()));
+
+        let proxy_validators: Vec<_> = signers.iter().map(|s| s.author()).collect();
+        let leader_election = Arc::new(ProxyLeaderElection::new(proxy_validators.clone(), author));
+        let block_store = Arc::new(ProxyBlockStore::new_for_epoch(epoch));
+        let safety_rules = Arc::new(Mutex::new(ProxySafetyRules::new_stub(
+            author,
+            epoch_state.clone(),
+        )));
+        let network = Arc::new(ProxyNetworkSender::new_stub(author, proxy_validators));
+        let time_service = TimeService::real();
+        let config = ProxyRoundManagerConfig::default();
+
+        let mut round_manager = ProxyRoundManager::new(
+            epoch_state,
+            block_store,
+            leader_election,
+            safety_rules,
+            network,
+            time_service,
+            config,
+            author,
+            1, // initial_round
+            1, // initial_primary_round
+        );
+
+        // Process QC for round 10
+        let qc1 = Arc::new(make_test_qc(epoch, 10));
+        round_manager.process_primary_qc(qc1);
+        assert_eq!(round_manager.current_primary_round(), 11);
+
+        // Process QC for round 5 (older) - should not go backwards
+        let qc2 = Arc::new(make_test_qc(epoch, 5));
+        round_manager.process_primary_qc(qc2);
+        assert_eq!(round_manager.current_primary_round(), 11); // Still 11
+    }
+
+    #[tokio::test]
+    async fn test_event_loop_shutdown() {
+        let (signers, verifier) = random_validator_verifier(4, None, true);
+        let author = signers[0].author();
+        let epoch = 1;
+
+        let epoch_state = Arc::new(EpochState::new(epoch, verifier.into()));
+
+        let proxy_validators: Vec<_> = signers.iter().map(|s| s.author()).collect();
+        let leader_election = Arc::new(ProxyLeaderElection::new(proxy_validators.clone(), author));
+        let block_store = Arc::new(ProxyBlockStore::new_for_epoch(epoch));
+        let safety_rules = Arc::new(Mutex::new(ProxySafetyRules::new_stub(
+            author,
+            epoch_state.clone(),
+        )));
+        let network = Arc::new(ProxyNetworkSender::new_stub(author, proxy_validators));
+        let time_service = TimeService::real();
+        let config = ProxyRoundManagerConfig::default();
+
+        let round_manager = ProxyRoundManager::new(
+            epoch_state,
+            block_store,
+            leader_election,
+            safety_rules,
+            network,
+            time_service,
+            config,
+            author,
+            1,
+            1,
+        );
+
+        let (primary_tx, primary_rx) = mpsc::unbounded_channel();
+        let (proxy_tx, _proxy_rx) = mpsc::unbounded_channel();
+
+        // Spawn the event loop
+        let handle = tokio::spawn(async move {
+            round_manager.start(primary_rx, proxy_tx).await;
+        });
+
+        // Send shutdown signal
+        primary_tx.send(PrimaryToProxyEvent::Shutdown).unwrap();
+
+        // Wait for the event loop to terminate
+        let result = tokio::time::timeout(Duration::from_secs(1), handle).await;
+        assert!(result.is_ok(), "Event loop should terminate on shutdown");
+    }
+
+    #[tokio::test]
+    async fn test_event_loop_processes_qc() {
+        let (signers, verifier) = random_validator_verifier(4, None, true);
+        let author = signers[0].author();
+        let epoch = 1;
+
+        let epoch_state = Arc::new(EpochState::new(epoch, verifier.into()));
+
+        let proxy_validators: Vec<_> = signers.iter().map(|s| s.author()).collect();
+        let leader_election = Arc::new(ProxyLeaderElection::new(proxy_validators.clone(), author));
+        let block_store = Arc::new(ProxyBlockStore::new_for_epoch(epoch));
+        let safety_rules = Arc::new(Mutex::new(ProxySafetyRules::new_stub(
+            author,
+            epoch_state.clone(),
+        )));
+        let network = Arc::new(ProxyNetworkSender::new_stub(author, proxy_validators));
+        let time_service = TimeService::real();
+        let config = ProxyRoundManagerConfig::default();
+
+        let round_manager = ProxyRoundManager::new(
+            epoch_state,
+            block_store.clone(),
+            leader_election,
+            safety_rules,
+            network,
+            time_service,
+            config,
+            author,
+            1,
+            1,
+        );
+
+        let (primary_tx, primary_rx) = mpsc::unbounded_channel();
+        let (proxy_tx, _proxy_rx) = mpsc::unbounded_channel();
+
+        // Spawn the event loop
+        let handle = tokio::spawn(async move {
+            round_manager.start(primary_rx, proxy_tx).await;
+        });
+
+        // Send a QC
+        let qc = Arc::new(make_test_qc(epoch, 5));
+        primary_tx
+            .send(PrimaryToProxyEvent::NewPrimaryQC(qc))
+            .unwrap();
+
+        // Give it time to process
+        tokio::time::sleep(Duration::from_millis(10)).await;
+
+        // Check the block store was updated
+        assert_eq!(block_store.highest_primary_qc().certified_block().round(), 5);
+
+        // Shutdown
+        primary_tx.send(PrimaryToProxyEvent::Shutdown).unwrap();
+
+        let result = tokio::time::timeout(Duration::from_secs(1), handle).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_event_loop_channel_closed() {
+        let (signers, verifier) = random_validator_verifier(4, None, true);
+        let author = signers[0].author();
+        let epoch = 1;
+
+        let epoch_state = Arc::new(EpochState::new(epoch, verifier.into()));
+
+        let proxy_validators: Vec<_> = signers.iter().map(|s| s.author()).collect();
+        let leader_election = Arc::new(ProxyLeaderElection::new(proxy_validators.clone(), author));
+        let block_store = Arc::new(ProxyBlockStore::new_for_epoch(epoch));
+        let safety_rules = Arc::new(Mutex::new(ProxySafetyRules::new_stub(
+            author,
+            epoch_state.clone(),
+        )));
+        let network = Arc::new(ProxyNetworkSender::new_stub(author, proxy_validators));
+        let time_service = TimeService::real();
+        let config = ProxyRoundManagerConfig::default();
+
+        let round_manager = ProxyRoundManager::new(
+            epoch_state,
+            block_store,
+            leader_election,
+            safety_rules,
+            network,
+            time_service,
+            config,
+            author,
+            1,
+            1,
+        );
+
+        let (primary_tx, primary_rx) = mpsc::unbounded_channel();
+        let (proxy_tx, _proxy_rx) = mpsc::unbounded_channel();
+
+        // Spawn the event loop
+        let handle = tokio::spawn(async move {
+            round_manager.start(primary_rx, proxy_tx).await;
+        });
+
+        // Drop the sender to close the channel
+        drop(primary_tx);
+
+        // Event loop should terminate when channel is closed
+        let result = tokio::time::timeout(Duration::from_secs(1), handle).await;
+        assert!(result.is_ok(), "Event loop should terminate when channel closes");
     }
 }

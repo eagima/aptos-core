@@ -4528,6 +4528,7 @@ dependencies = [
  "aptos-config",
  "aptos-forge",
  "aptos-global-constants",
+ "aptos-inspection-service",
  "aptos-keygen",
  "aptos-logger",
  "aptos-release-builder",

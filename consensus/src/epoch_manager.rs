@@ -188,6 +188,9 @@ pub struct EpochManager<P: OnChainConfigProvider> {
     // Channel to dispatch incoming proxy messages to ProxyRoundManager
     proxy_network_tx:
         Option<tokio::sync::mpsc::UnboundedSender<aptos_proxy_primary::VerifiedProxyEvent>>,
+    // Channel to dispatch OrderedProxyBlocksMsg from network to primary RoundManager
+    proxy_ordered_blocks_tx:
+        Option<tokio::sync::mpsc::UnboundedSender<aptos_proxy_primary::ProxyToPrimaryEvent>>,
 }
 
 impl<P: OnChainConfigProvider> EpochManager<P> {
@@ -265,6 +268,7 @@ impl<P: OnChainConfigProvider> EpochManager<P> {
             consensus_txn_filter_config,
             quorum_store_txn_filter_config,
             proxy_network_tx: None,
+            proxy_ordered_blocks_tx: None,
         }
     }
 
@@ -885,7 +889,7 @@ impl<P: OnChainConfigProvider> EpochManager<P> {
                 recovery_data.commit_root_block().round(),
             )
             .await;
-        let consensus_sk = consensus_key;
+        let consensus_sk = consensus_key.clone();
 
         let signer = Arc::new(ValidatorSigner::new(self.author, consensus_sk));
         let pipeline_builder = self.execution_client.pipeline_builder(signer);
@@ -978,6 +982,11 @@ impl<P: OnChainConfigProvider> EpochManager<P> {
             .max_blocks_per_receiving_request(onchain_consensus_config.quorum_store_enabled());
 
         // Create proxy consensus channels and spawn ProxyRoundManager if enabled
+        info!(
+            epoch = epoch,
+            enable_proxy_consensus = self.config.enable_proxy_consensus,
+            "Checking proxy consensus config"
+        );
         let (proxy_event_tx, proxy_event_rx) = if self.config.enable_proxy_consensus {
             let (primary_to_proxy_tx, primary_to_proxy_rx) =
                 tokio::sync::mpsc::unbounded_channel();
@@ -994,11 +1003,15 @@ impl<P: OnChainConfigProvider> EpochManager<P> {
             // Store the network sender for dispatching incoming proxy messages
             self.proxy_network_tx = Some(proxy_network_tx);
 
-            // Spawn ProxyRoundManager with the real network sender
+            // Store clone of proxy_to_primary_tx for dispatching network OrderedProxyBlocksMsg
+            self.proxy_ordered_blocks_tx = Some(proxy_to_primary_tx.clone());
+
+            // Spawn ProxyRoundManager with the real network sender and consensus key
             self.spawn_proxy_round_manager(
                 epoch,
                 epoch_state.clone(),
                 network_sender.clone(),
+                consensus_key.clone(),
                 primary_to_proxy_rx,
                 proxy_to_primary_tx,
                 proxy_network_rx,
@@ -1007,6 +1020,7 @@ impl<P: OnChainConfigProvider> EpochManager<P> {
             (Some(primary_to_proxy_tx), Some(proxy_to_primary_rx))
         } else {
             self.proxy_network_tx = None;
+            self.proxy_ordered_blocks_tx = None;
             (None, None)
         };
 
@@ -1052,6 +1066,7 @@ impl<P: OnChainConfigProvider> EpochManager<P> {
         epoch: u64,
         epoch_state: Arc<EpochState>,
         network_sender: Arc<NetworkSender>,
+        consensus_key: Arc<PrivateKey>,
         primary_to_proxy_rx: tokio::sync::mpsc::UnboundedReceiver<
             aptos_proxy_primary::PrimaryToProxyEvent,
         >,
@@ -1075,11 +1090,12 @@ impl<P: OnChainConfigProvider> EpochManager<P> {
         // Create ProxyBlockStore for this epoch
         let proxy_block_store = Arc::new(ProxyBlockStore::new_for_epoch(epoch));
 
-        // Create ProxySafetyRules
-        // For Phase 1, we create a stub safety rules instance without signing capability
-        // In production, this would use the real validator signer
+        // Create ValidatorSigner from consensus key for signing proposals and votes
+        let validator_signer = ValidatorSigner::new(self.author, consensus_key);
+
+        // Create ProxySafetyRules with real signer
         let proxy_safety_rules = Arc::new(aptos_infallible::Mutex::new(
-            ProxySafetyRules::new_stub(self.author, epoch_state.clone()),
+            ProxySafetyRules::new_with_signer(epoch_state.clone(), validator_signer),
         ));
 
         // Create ProxyRoundManagerConfig from ConsensusConfig
@@ -1867,14 +1883,24 @@ impl<P: OnChainConfigProvider> EpochManager<P> {
                 }
             },
             ConsensusMsg::OrderedProxyBlocksMsg(msg) => {
-                // This message goes to primary RoundManager, not ProxyRoundManager
-                // It will be handled via the proxy_event_rx channel in RoundManager
-                debug!(
-                    "Received OrderedProxyBlocksMsg with {} blocks for primary round {}",
-                    msg.proxy_blocks().len(),
-                    msg.primary_round()
-                );
-                // TODO: Dispatch to RoundManager's proxy event channel if needed
+                // Dispatch to primary RoundManager via the proxy event channel
+                if let Some(ref tx) = self.proxy_ordered_blocks_tx {
+                    debug!(
+                        "Dispatching OrderedProxyBlocksMsg with {} blocks for primary round {}",
+                        msg.proxy_blocks().len(),
+                        msg.primary_round()
+                    );
+                    let event =
+                        aptos_proxy_primary::ProxyToPrimaryEvent::OrderedProxyBlocks(*msg);
+                    if let Err(e) = tx.send(event) {
+                        warn!(
+                            "Failed to dispatch OrderedProxyBlocksMsg to RoundManager: {:?}",
+                            e
+                        );
+                    }
+                } else {
+                    debug!("Received OrderedProxyBlocksMsg but proxy consensus is not enabled");
+                }
             },
             _ => {
                 bail!("[EpochManager] Unexpected messages: {:?}", msg);

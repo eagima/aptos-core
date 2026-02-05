@@ -56,6 +56,10 @@ pub enum BlockType {
     /// Optimistic proposal.
     OptimisticProposal(OptBlockBody),
 
+    /// Proxy block for proxy primary consensus.
+    /// Created by proxy validators and aggregated into primary blocks.
+    ProxyBlock(OptProxyBlockBody),
+
     /// A virtual block that's constructed by nodes from DAG, this is purely a local thing so
     /// we hide it from serde
     #[serde(skip_deserializing)]
@@ -68,10 +72,6 @@ pub enum BlockType {
         parent_block_id: HashValue,
         parents_bitvec: BitVec,
     },
-
-    /// Proxy block for proxy primary consensus.
-    /// Created by proxy validators and aggregated into primary blocks.
-    ProxyBlock(OptProxyBlockBody),
 }
 
 #[derive(Deserialize, Serialize, Clone, Debug, PartialEq, Eq, CryptoHasher)]

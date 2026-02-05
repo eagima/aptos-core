@@ -109,6 +109,7 @@ impl ProxyBlockStore {
     /// The genesis block ID is derived from the epoch number.
     pub fn new_for_epoch(epoch: u64) -> Self {
         use aptos_consensus_types::vote_data::VoteData;
+        use aptos_crypto::hash::CryptoHash;
         use aptos_types::{
             aggregate_signature::AggregateSignature,
             block_info::BlockInfo,
@@ -119,9 +120,11 @@ impl ProxyBlockStore {
         let genesis_block_info = BlockInfo::new(epoch, 0, HashValue::zero(), HashValue::zero(), 0, 0, None);
         let genesis_block_id = genesis_block_info.id();
 
-        // Create a genesis QC
-        let vote_data = VoteData::new(genesis_block_info.clone(), genesis_block_info);
-        let ledger_info = LedgerInfo::new(BlockInfo::empty(), HashValue::zero());
+        // Create a genesis QC with matching consensus_data_hash
+        // For genesis QC verification, commit_info must equal certified_block
+        let vote_data = VoteData::new(genesis_block_info.clone(), genesis_block_info.clone());
+        let consensus_data_hash = vote_data.hash();
+        let ledger_info = LedgerInfo::new(genesis_block_info, consensus_data_hash);
         let li_sig = LedgerInfoWithSignatures::new(ledger_info, AggregateSignature::empty());
         let genesis_qc = QuorumCert::new(vote_data, li_sig);
 
@@ -170,13 +173,15 @@ impl ProxyBlockStore {
             return Err(ProxyConsensusError::ParentNotFound(block_id));
         }
 
-        // Add to ordered index
-        tree.ordered_by_primary_round
+        // Add to ordered index (deduplicate to avoid double-counting metrics)
+        let entry = tree
+            .ordered_by_primary_round
             .entry(primary_round)
-            .or_default()
-            .push(block_id);
-
-        proxy_metrics::PROXY_CONSENSUS_BLOCKS_ORDERED.inc();
+            .or_default();
+        if !entry.contains(&block_id) {
+            entry.push(block_id);
+            proxy_metrics::PROXY_CONSENSUS_BLOCKS_ORDERED.inc();
+        }
 
         Ok(())
     }

@@ -126,6 +126,9 @@ pub struct ProxyRoundManager {
     /// Pending order votes being aggregated
     pending_order_votes: HashMap<HashValue, Vec<OrderVote>>,
 
+    /// Last round we proposed for (to prevent re-proposals)
+    last_proposed_round: Round,
+
     /// Current primary round (from primary consensus)
     primary_round: Round,
     /// Latest primary QC received
@@ -161,6 +164,7 @@ impl ProxyRoundManager {
             proposal_generator: None,
             pending_votes: HashMap::new(),
             pending_order_votes: HashMap::new(),
+            last_proposed_round: 0,
             primary_round: initial_primary_round,
             latest_primary_qc: None,
             pending_primary_qc: None,
@@ -194,6 +198,7 @@ impl ProxyRoundManager {
             proposal_generator: Some(proposal_generator),
             pending_votes: HashMap::new(),
             pending_order_votes: HashMap::new(),
+            last_proposed_round: 0,
             primary_round: initial_primary_round,
             latest_primary_qc: None,
             pending_primary_qc: None,
@@ -271,7 +276,7 @@ impl ProxyRoundManager {
         );
 
         // Verify round is valid (must be higher than current)
-        if round <= self.current_round {
+        if round < self.current_round {
             return Err(ProxyConsensusError::RoundTooOld {
                 round,
                 last_voted: self.current_round,
@@ -351,7 +356,7 @@ impl ProxyRoundManager {
         &mut self,
         vote_msg: ProxyVoteMsg,
         sender: Author,
-        _primary_tx: &mpsc::UnboundedSender<ProxyToPrimaryEvent>,
+        primary_tx: &mpsc::UnboundedSender<ProxyToPrimaryEvent>,
     ) -> Result<(), ProxyConsensusError> {
         let vote = vote_msg.vote();
         let li_digest = vote.ledger_info().hash();
@@ -452,6 +457,39 @@ impl ProxyRoundManager {
                                 "ProxyRoundManager: block {} not found for order vote",
                                 block_id
                             );
+                        }
+
+                        // Walk parent chain to mark all blocks for this primary round as ordered
+                        let primary_round = self.primary_round;
+                        let mut walk_id = block_id;
+                        let mut has_cutting_point = false;
+                        loop {
+                            if let Some(walk_block) = self.block_store.get_block(walk_id) {
+                                if walk_block.block().block_data().primary_round()
+                                    != Some(primary_round)
+                                {
+                                    break;
+                                }
+                                let _ = self
+                                    .block_store
+                                    .mark_block_ordered(walk_id, primary_round);
+                                if walk_block.block().block_data().primary_qc().is_some() {
+                                    has_cutting_point = true;
+                                }
+                                walk_id = walk_block.block().parent_id();
+                            } else {
+                                break;
+                            }
+                        }
+
+                        // If we hit a cutting point, forward all ordered blocks
+                        if has_cutting_point {
+                            if let Err(e) = self
+                                .forward_ordered_blocks(primary_round, primary_tx)
+                                .await
+                            {
+                                warn!("Failed to forward ordered blocks: {:?}", e);
+                            }
                         }
 
                         debug!(
@@ -562,12 +600,20 @@ impl ProxyRoundManager {
             return Ok(());
         }
 
-        let primary_qc = self.latest_primary_qc.as_ref().ok_or_else(|| {
-            ProxyConsensusError::PrimaryQCRoundMismatch {
-                expected: primary_round.saturating_sub(1),
-                got: 0,
-            }
-        })?;
+        // Get primary QC: use latest_primary_qc, or extract from cutting-point block
+        let primary_qc = if let Some(ref qc) = self.latest_primary_qc {
+            (**qc).clone()
+        } else {
+            // Try to get primary QC from the last ordered block (the cutting point)
+            ordered_blocks
+                .iter()
+                .rev()
+                .find_map(|b| b.block().block_data().primary_qc().cloned())
+                .ok_or_else(|| ProxyConsensusError::PrimaryQCRoundMismatch {
+                    expected: primary_round.saturating_sub(1),
+                    got: 0,
+                })?
+        };
 
         // Collect blocks
         let blocks: Vec<Block> = ordered_blocks
@@ -577,7 +623,7 @@ impl ProxyRoundManager {
 
         // Create ordered proxy blocks message
         let ordered_msg =
-            OrderedProxyBlocksMsg::new(blocks.clone(), primary_round, (**primary_qc).clone());
+            OrderedProxyBlocksMsg::new(blocks.clone(), primary_round, primary_qc);
 
         info!(
             "ProxyRoundManager: forwarding {} ordered proxy blocks for primary round {}",
@@ -586,14 +632,14 @@ impl ProxyRoundManager {
         );
 
         // Broadcast to all primaries via network
+        // Note: ProxyNetworkSender::broadcast_ordered_proxy_blocks already increments
+        // PROXY_CONSENSUS_BLOCKS_FORWARDED and PROXY_BLOCKS_PER_PRIMARY_ROUND metrics
         self.network
             .broadcast_ordered_proxy_blocks(ordered_msg.clone())
             .await;
 
         // Also send via channel to local primary RoundManager
         let _ = primary_tx.send(ProxyToPrimaryEvent::OrderedProxyBlocks(ordered_msg));
-
-        proxy_metrics::PROXY_CONSENSUS_BLOCKS_FORWARDED.inc_by(blocks.len() as u64);
 
         // Clear pending primary QC since we've used it
         self.pending_primary_qc = None;
@@ -746,8 +792,27 @@ impl ProxyRoundManager {
     ) -> Result<(), ProxyConsensusError> {
         let round = self.current_round;
 
-        // Check if we are the leader for the current round
-        if !self.leader_election.is_leader(round) {
+        // Increment timeout counter for all nodes
+        proxy_metrics::PROXY_ROUND_TIMEOUT_ALL.inc();
+
+        let expected_leader = self.leader_election.get_leader(round);
+        let is_leader = self.leader_election.is_leader(round);
+
+        debug!(
+            round = round,
+            author = %self.author,
+            expected_leader = %expected_leader,
+            is_leader = is_leader,
+            num_validators = self.leader_election.num_validators(),
+            "ProxyRoundManager: round timeout fired"
+        );
+
+        if !is_leader {
+            return Ok(());
+        }
+
+        // Skip if we already proposed for this round
+        if round <= self.last_proposed_round {
             return Ok(());
         }
 
@@ -807,8 +872,59 @@ impl ProxyRoundManager {
         // Broadcast proposal to all proxy validators
         self.network.broadcast_proxy_proposal(proposal_msg).await;
 
+        // Record that we've proposed for this round
+        self.last_proposed_round = round;
+
         // Increment round timeout counter for metrics
         proxy_metrics::PROXY_ROUND_TIMEOUT_COUNT.inc();
+
+        // Leader self-processing: insert block into own block store and create self-vote
+        let pipelined_block =
+            PipelinedBlock::new_ordered(block.clone(), OrderedBlockWindow::empty());
+        if let Err(e) = self.block_store.insert_block(Arc::new(pipelined_block)) {
+            warn!(
+                "ProxyRoundManager: failed to insert own proposal into block store: {:?}",
+                e
+            );
+        }
+
+        // Create self-vote using safety rules
+        let accumulator_extension_proof = AccumulatorExtensionProof::new(vec![], 0, vec![]);
+        let vote_proposal = VoteProposal::new(
+            accumulator_extension_proof,
+            block.clone(),
+            None,  // next_epoch_state
+            true,  // decoupled_execution
+        );
+        match self
+            .safety_rules
+            .lock()
+            .construct_and_sign_proxy_vote(&vote_proposal, None)
+        {
+            Ok(vote) => {
+                // Add self-vote to pending_votes
+                let li_digest = vote.ledger_info().hash();
+                let (_, sig_aggregator) =
+                    self.pending_votes.entry(li_digest).or_insert_with(|| {
+                        (
+                            vote.vote_data().clone(),
+                            SignatureAggregator::new(vote.ledger_info().clone()),
+                        )
+                    });
+                sig_aggregator.add_signature(vote.author(), vote.signature_with_status());
+
+                debug!(
+                    "ProxyRoundManager: leader self-voted on proposal for round {}",
+                    round
+                );
+            },
+            Err(e) => {
+                warn!(
+                    "ProxyRoundManager: failed to create self-vote for round {}: {:?}",
+                    round, e
+                );
+            },
+        }
 
         debug!(
             "ProxyRoundManager: broadcast proposal for round {}, primary_round {}",

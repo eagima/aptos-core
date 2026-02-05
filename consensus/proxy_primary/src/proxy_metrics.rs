@@ -160,11 +160,20 @@ pub static PROXY_BACKPRESSURE_EVENTS: Lazy<IntCounter> = Lazy::new(|| {
     .unwrap()
 });
 
-/// Round timeout events
+/// Round timeout events (all, including non-leader)
+pub static PROXY_ROUND_TIMEOUT_ALL: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(
+        "aptos_proxy_round_timeout_all",
+        "Number of round timeout events in proxy consensus (all nodes)"
+    )
+    .unwrap()
+});
+
+/// Round timeout events (leader only, proposal sent)
 pub static PROXY_ROUND_TIMEOUT_COUNT: Lazy<IntCounter> = Lazy::new(|| {
     register_int_counter!(
         "aptos_proxy_round_timeout_count",
-        "Number of round timeout events in proxy consensus"
+        "Number of round timeout events in proxy consensus (leader)"
     )
     .unwrap()
 });

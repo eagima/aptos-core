@@ -395,6 +395,7 @@ impl NetworkSender {
             .collect();
         self.sort_peers_by_latency(&mut other_validators);
 
+
         counters::CONSENSUS_SENT_MSGS
             .with_label_values(&[msg.name()])
             .inc_by(other_validators.len() as u64);

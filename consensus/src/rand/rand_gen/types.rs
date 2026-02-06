@@ -436,7 +436,11 @@ impl<S: TShare> RandShare<S> {
 
     pub fn optimistic_verify(&self, rand_config: &RandConfig) -> anyhow::Result<()> {
         if rand_config.should_verify_optimistically(&self.author) {
-            Ok(()) // defer to batch verification at aggregation
+            // Still perform cheap structural checks (author exists, APK certified)
+            // to prevent invalid shares from reaching aggregation where they would
+            // cause build_apks_and_proofs to fail hard, bypassing the fallback.
+            rand_config.verify_structural(&self.author)?;
+            Ok(())
         } else {
             self.verify(rand_config) // pessimistic: verify individually
         }
@@ -789,6 +793,23 @@ impl RandConfig {
 
     pub fn pk(&self) -> &PK {
         &self.pk
+    }
+
+    /// Cheap structural validation: author is a known validator and has a certified APK.
+    /// This catches shares that would cause `build_apks_and_proofs` to fail hard,
+    /// without performing the expensive cryptographic pairing check.
+    pub fn verify_structural(&self, author: &Author) -> anyhow::Result<()> {
+        let index = *self
+            .validator
+            .address_to_validator_index()
+            .get(author)
+            .ok_or_else(|| anyhow!("Structural check failed: unknown author {}", author))?;
+        ensure!(
+            self.keys.certified_apks[index].get().is_some(),
+            "Structural check failed: no certified APK for author {}",
+            author
+        );
+        Ok(())
     }
 }
 

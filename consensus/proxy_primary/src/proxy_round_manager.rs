@@ -615,11 +615,12 @@ impl ProxyRoundManager {
                 })?
         };
 
-        // Collect blocks
-        let blocks: Vec<Block> = ordered_blocks
+        // Collect blocks in oldest-first order (chain walk marks newest-first)
+        let mut blocks: Vec<Block> = ordered_blocks
             .iter()
             .map(|b| b.block().clone())
             .collect();
+        blocks.reverse();
 
         // Create ordered proxy blocks message
         let ordered_msg =

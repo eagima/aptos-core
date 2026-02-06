@@ -136,13 +136,10 @@ impl TShare for Share {
                 );
                 let mut valid_shares = vec![];
                 for share in &shares_vec {
-                    // Shares from pessimistic authors were already individually
-                    // verified on receipt, so skip re-verification for them.
-                    if rand_config.pessimistic_verify_set.contains(share.author())
-                        || share
-                            .share
-                            .verify(rand_config, &rand_metadata, &share.author)
-                            .is_ok()
+                    if share
+                        .share
+                        .verify(rand_config, &rand_metadata, &share.author)
+                        .is_ok()
                     {
                         valid_shares.push(*share);
                     } else {

@@ -112,54 +112,66 @@ impl TShare for Share {
             anyhow!("Share::aggregate failed with metadata serialization error: {e}")
         })?;
 
-        // Batch-verify the aggregated proof
-        let proof = if WVUF::verify_proof(
-            &rand_config.vuf_pp,
-            rand_config.pk(),
-            &rand_config.get_all_certified_apk(),
-            metadata_serialized.as_slice(),
-            &proof,
-        )
-        .is_ok()
-        {
-            proof
-        } else {
-            // Batch verification failed; fall back to individual verification
-            warn!(
-                "Batch verification failed for round {}, falling back to individual verification",
-                rand_metadata.round
-            );
-            let mut valid_shares = vec![];
-            for share in &shares_vec {
-                if share
-                    .share
-                    .verify(rand_config, &rand_metadata, &share.author)
-                    .is_ok()
-                {
-                    valid_shares.push(*share);
-                } else {
-                    warn!(
-                        "Share from {} failed individual verification, adding to pessimistic set",
-                        share.author
-                    );
-                    rand_config.add_to_pessimistic_set(share.author);
+        // When optimistic verification is enabled, shares were not individually verified
+        // on receipt, so we batch-verify the aggregated proof here. On failure, fall back
+        // to individual verification to identify and discard bad shares.
+        // When optimistic verification is disabled, shares were already verified on receipt,
+        // so we can use the aggregated proof directly.
+        let proof = if rand_config.optimistic_rand_share_verification {
+            if WVUF::verify_proof(
+                &rand_config.vuf_pp,
+                rand_config.pk(),
+                &rand_config.get_all_certified_apk(),
+                metadata_serialized.as_slice(),
+                &proof,
+            )
+            .is_ok()
+            {
+                proof
+            } else {
+                // Batch verification failed; fall back to individual verification
+                warn!(
+                    "Batch verification failed for round {}, falling back to individual verification",
+                    rand_metadata.round
+                );
+                let mut valid_shares = vec![];
+                for share in &shares_vec {
+                    // Shares from pessimistic authors were already individually
+                    // verified on receipt, so skip re-verification for them.
+                    if rand_config.pessimistic_verify_set.contains(share.author())
+                        || share
+                            .share
+                            .verify(rand_config, &rand_metadata, &share.author)
+                            .is_ok()
+                    {
+                        valid_shares.push(*share);
+                    } else {
+                        warn!(
+                            "Share from {} failed individual verification, adding to pessimistic set",
+                            share.author
+                        );
+                        rand_config.add_to_pessimistic_set(share.author);
+                    }
                 }
+
+                let valid_apks_and_proofs =
+                    Self::build_apks_and_proofs(&valid_shares, rand_config)?;
+
+                let total_weight: u64 = valid_shares
+                    .iter()
+                    .map(|s| rand_config.get_peer_weight(s.author()))
+                    .sum();
+                ensure!(
+                    total_weight >= rand_config.threshold(),
+                    "Share::aggregate failed: insufficient valid shares after fallback ({} < {})",
+                    total_weight,
+                    rand_config.threshold()
+                );
+
+                WVUF::aggregate_shares(&rand_config.wconfig, &valid_apks_and_proofs)
             }
-
-            let valid_apks_and_proofs = Self::build_apks_and_proofs(&valid_shares, rand_config)?;
-
-            let total_weight: u64 = valid_shares
-                .iter()
-                .map(|s| rand_config.get_peer_weight(s.author()))
-                .sum();
-            ensure!(
-                total_weight >= rand_config.threshold(),
-                "Share::aggregate failed: insufficient valid shares after fallback ({} < {})",
-                total_weight,
-                rand_config.threshold()
-            );
-
-            WVUF::aggregate_shares(&rand_config.wconfig, &valid_apks_and_proofs)
+        } else {
+            proof
         };
 
         let eval = WVUF::derive_eval(
@@ -1032,5 +1044,32 @@ mod tests {
 
         // With optimization disabled, every share is verified individually
         assert!(share.optimistic_verify(&ctx.rand_configs[0]).is_err());
+    }
+
+    #[test]
+    fn test_optimistic_share_aggregate_insufficient_valid_shares() {
+        // 4 validators with equal weight; threshold is >50%, so need at least 3 valid shares.
+        let ctx = MultiValidatorTestContext::new(vec![1, 1, 1, 1], true);
+        let metadata = RandMetadata { epoch: 1, round: 1 };
+
+        // Only 1 real share from validator 0
+        let real_share = Share::generate(&ctx.rand_configs[0], metadata.clone());
+
+        // 3 corrupted shares: use wrong keys for validators 1, 2, 3
+        let bad1 = Share::generate(&ctx.rand_configs[2], metadata.clone());
+        let bad2 = Share::generate(&ctx.rand_configs[3], metadata.clone());
+        let bad3 = Share::generate(&ctx.rand_configs[0], metadata.clone());
+        let shares = vec![
+            real_share,
+            RandShare::new(ctx.authors[1], metadata.clone(), bad1.share().clone()),
+            RandShare::new(ctx.authors[2], metadata.clone(), bad2.share().clone()),
+            RandShare::new(ctx.authors[3], metadata.clone(), bad3.share().clone()),
+        ];
+
+        let result = Share::aggregate(shares.iter(), &ctx.rand_configs[0], metadata);
+        assert!(
+            result.is_err(),
+            "Aggregation should fail: insufficient valid shares after fallback"
+        );
     }
 }

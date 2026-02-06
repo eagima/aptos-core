@@ -19,6 +19,7 @@ use aptos_types::{
     validator_verifier::ValidatorVerifier,
 };
 use dashmap::DashSet;
+use rayon::prelude::*;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use sha3::{Digest, Sha3_256};
 use std::{fmt::Debug, sync::Arc};
@@ -134,13 +135,23 @@ impl TShare for Share {
                     "Batch verification failed for round {}, falling back to individual verification",
                     rand_metadata.round
                 );
+                // Verify shares in parallel using the execution thread pool
+                let verification_results: Vec<bool> =
+                    THREAD_MANAGER.get_exe_cpu_pool().install(|| {
+                        shares_vec
+                            .par_iter()
+                            .map(|share| {
+                                share
+                                    .share
+                                    .verify(rand_config, &rand_metadata, &share.author)
+                                    .is_ok()
+                            })
+                            .collect()
+                    });
+
                 let mut valid_shares = vec![];
-                for share in &shares_vec {
-                    if share
-                        .share
-                        .verify(rand_config, &rand_metadata, &share.author)
-                        .is_ok()
-                    {
+                for (share, is_valid) in shares_vec.iter().zip(verification_results) {
+                    if is_valid {
                         valid_shares.push(*share);
                     } else {
                         warn!(

@@ -299,11 +299,12 @@ impl PrimaryBlockFromProxyBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use aptos_consensus_types::vote_data::VoteData;
+    use aptos_consensus_types::{block_data::BlockData, vote_data::VoteData};
     use aptos_types::{
         aggregate_signature::AggregateSignature,
         block_info::BlockInfo,
         ledger_info::{LedgerInfo, LedgerInfoWithSignatures},
+        validator_signer::ValidatorSigner,
     };
 
     fn make_qc(epoch: u64, round: Round) -> QuorumCert {
@@ -314,6 +315,79 @@ mod tests {
         let li_sig = LedgerInfoWithSignatures::new(ledger_info, AggregateSignature::empty());
         QuorumCert::new(vote_data, li_sig)
     }
+
+    /// Create a QC that certifies a specific block (by block_id and round).
+    fn make_qc_for_block(epoch: u64, round: Round, block_id: HashValue) -> QuorumCert {
+        let block_info =
+            BlockInfo::new(epoch, round, block_id, HashValue::random(), 0, 0, None);
+        let vote_data = VoteData::new(block_info.clone(), block_info.clone());
+        let ledger_info = LedgerInfo::new(block_info, HashValue::zero());
+        let li_sig = LedgerInfoWithSignatures::new(ledger_info, AggregateSignature::empty());
+        QuorumCert::new(vote_data, li_sig)
+    }
+
+    /// Create a signed proxy Block.
+    fn make_proxy_block(
+        signer: &ValidatorSigner,
+        round: Round,
+        parent_qc: QuorumCert,
+        primary_round: Round,
+        primary_qc: Option<QuorumCert>,
+    ) -> Block {
+        let block_data = BlockData::new_from_proxy(
+            1, // epoch
+            round,
+            aptos_infallible::duration_since_epoch().as_micros() as u64,
+            parent_qc,
+            vec![],                    // validator_txns
+            Payload::empty(false, true), // payload
+            signer.author(),
+            vec![],                    // failed_authors
+            primary_round,
+            primary_qc,
+        );
+        Block::new_proposal_from_block_data(block_data, signer).unwrap()
+    }
+
+    /// Create a chain of linked proxy blocks. Only the last block gets primary_qc attached.
+    fn make_proxy_block_chain(
+        signer: &ValidatorSigner,
+        num_blocks: usize,
+        start_round: Round,
+        primary_round: Round,
+        primary_qc: Option<QuorumCert>,
+    ) -> Vec<Block> {
+        assert!(num_blocks > 0);
+        let mut blocks = Vec::with_capacity(num_blocks);
+
+        // First block uses a genesis QC
+        let genesis_qc = make_qc(1, 0);
+        let is_last = num_blocks == 1;
+        let first_pqc = if is_last { primary_qc.clone() } else { None };
+        let first = make_proxy_block(signer, start_round, genesis_qc, primary_round, first_pqc);
+        blocks.push(first);
+
+        for i in 1..num_blocks {
+            let prev = &blocks[i - 1];
+            let parent_qc = make_qc_for_block(1, prev.round(), prev.id());
+            let is_last = i == num_blocks - 1;
+            let pqc = if is_last { primary_qc.clone() } else { None };
+            let block = make_proxy_block(
+                signer,
+                start_round + i as u64,
+                parent_qc,
+                primary_round,
+                pqc,
+            );
+            blocks.push(block);
+        }
+
+        blocks
+    }
+
+    // =========================================================================
+    // Existing tests
+    // =========================================================================
 
     #[test]
     fn test_primary_block_from_proxy_empty() {
@@ -331,6 +405,323 @@ mod tests {
         // This should fail because QC.round (5) != primary_round - 1 (0)
         let msg = OrderedProxyBlocksMsg::new(vec![], 1, primary_qc);
         let result = PrimaryBlockFromProxy::from_ordered_msg(msg);
+        assert!(result.is_err());
+    }
+
+    // =========================================================================
+    // Happy path tests
+    // =========================================================================
+
+    #[test]
+    fn test_from_ordered_msg_single_block() {
+        let signer = ValidatorSigner::from_int(0);
+        let primary_round = 2;
+        let msg_primary_qc = make_qc(1, 1); // QC.round == primary_round - 1
+
+        let block = make_proxy_block(
+            &signer,
+            1,
+            make_qc(1, 0),
+            primary_round,
+            Some(msg_primary_qc.clone()),
+        );
+
+        let msg = OrderedProxyBlocksMsg::new(vec![block], primary_round, msg_primary_qc);
+        let result = PrimaryBlockFromProxy::from_ordered_msg(msg).unwrap();
+
+        assert_eq!(result.num_blocks(), 1);
+        assert_eq!(result.primary_round(), primary_round);
+        assert_eq!(result.proxy_blocks().len(), 1);
+    }
+
+    #[test]
+    fn test_from_ordered_msg_multiple_linked_blocks() {
+        let signer = ValidatorSigner::from_int(0);
+        let primary_round = 2;
+        let msg_primary_qc = make_qc(1, 1);
+
+        let blocks =
+            make_proxy_block_chain(&signer, 3, 1, primary_round, Some(msg_primary_qc.clone()));
+
+        let msg = OrderedProxyBlocksMsg::new(blocks.clone(), primary_round, msg_primary_qc);
+        let result = PrimaryBlockFromProxy::from_ordered_msg(msg).unwrap();
+
+        assert_eq!(result.num_blocks(), 3);
+        assert_eq!(result.primary_round(), primary_round);
+        // Verify block order is preserved
+        assert_eq!(result.proxy_blocks()[0].id(), blocks[0].id());
+        assert_eq!(result.proxy_blocks()[1].id(), blocks[1].id());
+        assert_eq!(result.proxy_blocks()[2].id(), blocks[2].id());
+    }
+
+    // =========================================================================
+    // Validation error tests
+    // =========================================================================
+
+    #[test]
+    fn test_from_ordered_msg_unlinked_blocks_rejected() {
+        let signer = ValidatorSigner::from_int(0);
+        let primary_round = 2;
+        let msg_primary_qc = make_qc(1, 1);
+
+        // Create two independent blocks (not linked by parent)
+        let block1 = make_proxy_block(&signer, 1, make_qc(1, 0), primary_round, None);
+        let block2 = make_proxy_block(
+            &signer,
+            2,
+            make_qc(1, 0), // NOT referencing block1
+            primary_round,
+            Some(msg_primary_qc.clone()),
+        );
+
+        let msg =
+            OrderedProxyBlocksMsg::new(vec![block1, block2], primary_round, msg_primary_qc);
+        let result = PrimaryBlockFromProxy::from_ordered_msg(msg);
+        assert!(result.is_err());
+        let err_msg = format!("{:?}", result.unwrap_err());
+        assert!(
+            err_msg.contains("not properly linked"),
+            "Expected 'not properly linked' error, got: {}",
+            err_msg
+        );
+    }
+
+    #[test]
+    fn test_from_ordered_msg_missing_primary_qc_on_last_block() {
+        let signer = ValidatorSigner::from_int(0);
+        let primary_round = 2;
+        let msg_primary_qc = make_qc(1, 1);
+
+        // Single block with NO primary_qc attached
+        let block = make_proxy_block(&signer, 1, make_qc(1, 0), primary_round, None);
+
+        let msg = OrderedProxyBlocksMsg::new(vec![block], primary_round, msg_primary_qc);
+        let result = PrimaryBlockFromProxy::from_ordered_msg(msg);
+        assert!(result.is_err());
+        let err_msg = format!("{:?}", result.unwrap_err());
+        assert!(
+            err_msg.contains("primary QC"),
+            "Expected primary QC error, got: {}",
+            err_msg
+        );
+    }
+
+    #[test]
+    fn test_from_ordered_msg_wrong_primary_round() {
+        let signer = ValidatorSigner::from_int(0);
+        let msg_primary_qc = make_qc(1, 1); // For primary_round=2
+
+        // Block has primary_round=3, but message says primary_round=2
+        let block = make_proxy_block(
+            &signer,
+            1,
+            make_qc(1, 0),
+            3, // block says primary_round=3
+            Some(msg_primary_qc.clone()),
+        );
+
+        let msg = OrderedProxyBlocksMsg::new(
+            vec![block],
+            2, // message says primary_round=2
+            msg_primary_qc,
+        );
+        let result = PrimaryBlockFromProxy::from_ordered_msg(msg);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_from_ordered_msg_non_proxy_block_rejected() {
+        let signer = ValidatorSigner::from_int(0);
+        let primary_round = 2;
+        let msg_primary_qc = make_qc(1, 1);
+
+        // Create a normal (non-proxy) block
+        let normal_block = Block::new_proposal(
+            Payload::empty(false, true),
+            1,
+            aptos_infallible::duration_since_epoch().as_micros() as u64,
+            make_qc(1, 0),
+            &signer,
+            vec![],
+        )
+        .unwrap();
+
+        let msg = OrderedProxyBlocksMsg::new(vec![normal_block], primary_round, msg_primary_qc);
+        let result = PrimaryBlockFromProxy::from_ordered_msg(msg);
+        assert!(result.is_err());
+        let err_msg = format!("{:?}", result.unwrap_err());
+        assert!(
+            err_msg.contains("not a proxy block"),
+            "Expected 'not a proxy block' error, got: {}",
+            err_msg
+        );
+    }
+
+    // =========================================================================
+    // Determinism and accessor tests
+    // =========================================================================
+
+    #[test]
+    fn test_aggregated_hash_deterministic() {
+        let signer = ValidatorSigner::from_int(0);
+        let primary_round = 2;
+        let msg_primary_qc = make_qc(1, 1);
+
+        let block = make_proxy_block(
+            &signer,
+            1,
+            make_qc(1, 0),
+            primary_round,
+            Some(msg_primary_qc.clone()),
+        );
+
+        // Create two PrimaryBlockFromProxy from the same block
+        let msg1 =
+            OrderedProxyBlocksMsg::new(vec![block.clone()], primary_round, msg_primary_qc.clone());
+        let msg2 = OrderedProxyBlocksMsg::new(vec![block], primary_round, msg_primary_qc);
+
+        let result1 = PrimaryBlockFromProxy::from_ordered_msg(msg1).unwrap();
+        let result2 = PrimaryBlockFromProxy::from_ordered_msg(msg2).unwrap();
+
+        assert_eq!(
+            result1.aggregated_payload_hash(),
+            result2.aggregated_payload_hash(),
+            "Same blocks should produce the same aggregated hash"
+        );
+    }
+
+    #[test]
+    fn test_aggregated_hash_differs_for_different_blocks() {
+        let signer = ValidatorSigner::from_int(0);
+        let primary_round = 2;
+        let msg_primary_qc = make_qc(1, 1);
+
+        let block1 = make_proxy_block(
+            &signer,
+            1,
+            make_qc(1, 0),
+            primary_round,
+            Some(msg_primary_qc.clone()),
+        );
+        let block2 = make_proxy_block(
+            &signer,
+            2,
+            make_qc(1, 0),
+            primary_round,
+            Some(msg_primary_qc.clone()),
+        );
+
+        let msg1 =
+            OrderedProxyBlocksMsg::new(vec![block1], primary_round, msg_primary_qc.clone());
+        let msg2 = OrderedProxyBlocksMsg::new(vec![block2], primary_round, msg_primary_qc);
+
+        let result1 = PrimaryBlockFromProxy::from_ordered_msg(msg1).unwrap();
+        let result2 = PrimaryBlockFromProxy::from_ordered_msg(msg2).unwrap();
+
+        assert_ne!(
+            result1.aggregated_payload_hash(),
+            result2.aggregated_payload_hash(),
+            "Different blocks should produce different aggregated hashes"
+        );
+    }
+
+    #[test]
+    fn test_aggregate_payloads_phase1() {
+        let signer = ValidatorSigner::from_int(0);
+        let primary_round = 2;
+        let msg_primary_qc = make_qc(1, 1);
+
+        let block = make_proxy_block(
+            &signer,
+            1,
+            make_qc(1, 0),
+            primary_round,
+            Some(msg_primary_qc.clone()),
+        );
+
+        let msg = OrderedProxyBlocksMsg::new(vec![block], primary_round, msg_primary_qc);
+        let result = PrimaryBlockFromProxy::from_ordered_msg(msg).unwrap();
+
+        // Phase 1: aggregate_payloads returns empty payload
+        let payload = result.aggregate_payloads();
+        assert_eq!(payload.len(), 0);
+    }
+
+    #[test]
+    fn test_accessors() {
+        let signer = ValidatorSigner::from_int(0);
+        let primary_round = 2;
+        let msg_primary_qc = make_qc(1, 1);
+
+        let blocks =
+            make_proxy_block_chain(&signer, 3, 1, primary_round, Some(msg_primary_qc.clone()));
+        let first_id = blocks[0].id();
+        let last_id = blocks[2].id();
+        let first_ts = blocks[0].timestamp_usecs();
+        let last_ts = blocks[2].timestamp_usecs();
+
+        let msg = OrderedProxyBlocksMsg::new(blocks, primary_round, msg_primary_qc);
+        let result = PrimaryBlockFromProxy::from_ordered_msg(msg).unwrap();
+
+        assert_eq!(result.first_block_id(), first_id);
+        assert_eq!(result.last_block_id(), last_id);
+
+        let (ts_start, ts_end) = result.timestamp_range();
+        assert_eq!(ts_start, first_ts);
+        assert_eq!(ts_end, last_ts);
+
+        // Empty payloads → total_txn_count = 0
+        assert_eq!(result.total_txn_count(), 0);
+        assert!(!result.has_validator_txns());
+        assert!(result.validator_txns().is_empty());
+    }
+
+    // =========================================================================
+    // Builder tests
+    // =========================================================================
+
+    #[test]
+    fn test_builder_with_blocks_and_qc() {
+        let signer = ValidatorSigner::from_int(0);
+        let primary_round = 2;
+        let msg_primary_qc = make_qc(1, 1);
+
+        let block = make_proxy_block(
+            &signer,
+            1,
+            make_qc(1, 0),
+            primary_round,
+            Some(msg_primary_qc.clone()),
+        );
+
+        let result = PrimaryBlockFromProxyBuilder::new(primary_round)
+            .with_proxy_block(block)
+            .with_primary_qc(msg_primary_qc)
+            .build();
+
+        assert!(result.is_ok());
+        let pbfp = result.unwrap();
+        assert_eq!(pbfp.num_blocks(), 1);
+        assert_eq!(pbfp.primary_round(), primary_round);
+    }
+
+    #[test]
+    fn test_builder_without_qc_fails() {
+        let signer = ValidatorSigner::from_int(0);
+        let primary_round = 2;
+
+        let block = make_proxy_block(
+            &signer,
+            1,
+            make_qc(1, 0),
+            primary_round,
+            None,
+        );
+
+        let result = PrimaryBlockFromProxyBuilder::new(primary_round)
+            .with_proxy_block(block)
+            .build();
+
         assert!(result.is_err());
     }
 }

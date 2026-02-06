@@ -146,8 +146,7 @@ impl TShare for Share {
                 }
             }
 
-            let valid_apks_and_proofs =
-                Self::build_apks_and_proofs(&valid_shares, rand_config)?;
+            let valid_apks_and_proofs = Self::build_apks_and_proofs(&valid_shares, rand_config)?;
 
             let total_weight: u64 = valid_shares
                 .iter()
@@ -898,8 +897,12 @@ mod tests {
             // Build a RandConfig for each validator
             let mut rand_configs = vec![];
             for i in 0..num_validators {
-                let keys =
-                    RandKeys::new(asks[i].clone(), apks[i].clone(), pk_shares.clone(), num_validators);
+                let keys = RandKeys::new(
+                    asks[i].clone(),
+                    apks[i].clone(),
+                    pk_shares.clone(),
+                    num_validators,
+                );
                 let config = RandConfig::new(
                     authors[i],
                     target_epoch,
@@ -941,7 +944,11 @@ mod tests {
             .collect();
 
         let result = Share::aggregate(shares.iter(), &ctx.rand_configs[0], metadata);
-        assert!(result.is_ok(), "Aggregation should succeed: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "Aggregation should succeed: {:?}",
+            result.err()
+        );
 
         // Pessimistic set should be empty (no fallback needed)
         assert!(
@@ -963,7 +970,11 @@ mod tests {
         // Create a corrupted share: use validator 4's key but attribute to validator 3
         let bad_author = ctx.authors[3];
         let wrong_share = Share::generate(&ctx.rand_configs[4], metadata.clone());
-        shares.push(RandShare::new(bad_author, metadata.clone(), wrong_share.share().clone()));
+        shares.push(RandShare::new(
+            bad_author,
+            metadata.clone(),
+            wrong_share.share().clone(),
+        ));
 
         let result = Share::aggregate(shares.iter(), &ctx.rand_configs[0], metadata);
         assert!(
@@ -974,7 +985,9 @@ mod tests {
 
         // The bad author should be in the pessimistic set
         assert!(
-            ctx.rand_configs[0].pessimistic_verify_set.contains(&bad_author),
+            ctx.rand_configs[0]
+                .pessimistic_verify_set
+                .contains(&bad_author),
             "Bad author should be in the pessimistic set"
         );
     }

@@ -18,13 +18,15 @@ pub fn get_proxy_test(test_name: &str, _duration: Duration) -> Option<ForgeConfi
 }
 
 /// Basic happy path test for proxy primary consensus.
-fn proxy_primary_happy_path_test() -> ForgeConfig {
+pub fn proxy_primary_happy_path_test() -> ForgeConfig {
     ForgeConfig::default()
         .with_initial_validator_count(NonZeroUsize::new(3).unwrap())
         .add_network_test(ProxyPrimaryHappyPathTest::default())
         .with_validator_override_node_config_fn(Arc::new(|config, _| {
-            // Enable proxy consensus
             config.consensus.enable_proxy_consensus = true;
+            // Increase timeouts since proxy is not colocated in tests
+            config.consensus.proxy_consensus_config.round_initial_timeout_ms = 1000;
+            config.consensus.round_initial_timeout_ms = 10000;
         }))
         // Simple success criteria for local swarm (no Prometheus needed)
         .with_success_criteria(
@@ -40,8 +42,10 @@ fn proxy_primary_load_test() -> ForgeConfig {
         .with_initial_validator_count(NonZeroUsize::new(4).unwrap())
         .add_network_test(ProxyPrimaryLoadTest::default())
         .with_validator_override_node_config_fn(Arc::new(|config, _| {
-            // Enable proxy consensus
             config.consensus.enable_proxy_consensus = true;
+            // Increase timeouts since proxy is not colocated in tests
+            config.consensus.proxy_consensus_config.round_initial_timeout_ms = 1000;
+            config.consensus.round_initial_timeout_ms = 10000;
         }))
         // Simple success criteria for local swarm (no Prometheus needed)
         .with_success_criteria(

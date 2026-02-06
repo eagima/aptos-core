@@ -81,6 +81,10 @@ struct PrimaryConsensusMetrics {
     last_committed_round: i64,
     current_round: i64,
     committed_blocks: i64,
+    /// Ledger version from consensus (tracks execution + commit)
+    last_committed_version: i64,
+    /// Ledger version from storage (confirms persistence)
+    storage_ledger_version: i64,
 }
 
 /// Query proxy consensus metrics aggregated across all validators.
@@ -191,16 +195,38 @@ async fn query_primary_metrics(
             .ok()
             .flatten()
             .unwrap_or(0);
-        (committed_round, current_round, committed_blocks)
+        let committed_version = client
+            .get_node_metric_i64("aptos_consensus_last_committed_version{}")
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or(0);
+        let storage_version = client
+            .get_node_metric_i64("aptos_storage_ledger_version{}")
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or(0);
+        (
+            committed_round,
+            current_round,
+            committed_blocks,
+            committed_version,
+            storage_version,
+        )
     });
 
     let results = join_all(metrics_futures).await;
 
     let mut metrics = PrimaryConsensusMetrics::default();
-    for (committed_round, current_round, committed_blocks) in results {
+    for (committed_round, current_round, committed_blocks, committed_version, storage_version) in
+        results
+    {
         metrics.last_committed_round = metrics.last_committed_round.max(committed_round);
         metrics.current_round = metrics.current_round.max(current_round);
         metrics.committed_blocks = metrics.committed_blocks.max(committed_blocks);
+        metrics.last_committed_version = metrics.last_committed_version.max(committed_version);
+        metrics.storage_ledger_version = metrics.storage_ledger_version.max(storage_version);
     }
 
     Ok(metrics)
@@ -248,12 +274,20 @@ impl NetworkTest for ProxyPrimaryHappyPathTest {
         );
         info!("  current_round: {}", primary_metrics.current_round);
         info!("  committed_blocks: {}", primary_metrics.committed_blocks);
+        info!(
+            "  last_committed_version: {}",
+            primary_metrics.last_committed_version
+        );
+        info!(
+            "  storage_ledger_version: {}",
+            primary_metrics.storage_ledger_version
+        );
 
         // Report to test framework
         {
             let mut ctx = ctx.ctx.lock().await;
             ctx.report.report_text(format!(
-                "Proxy: proposals={}, votes={}, qcs={}, ordered={}, forwarded={} | Primary: committed_round={}, committed_blocks={}",
+                "Proxy: proposals={}, votes={}, qcs={}, ordered={}, forwarded={} | Primary: committed_round={}, committed_blocks={}, committed_version={}, storage_version={}",
                 proxy_metrics.proposals_sent,
                 proxy_metrics.votes_sent,
                 proxy_metrics.qcs_formed,
@@ -261,6 +295,8 @@ impl NetworkTest for ProxyPrimaryHappyPathTest {
                 proxy_metrics.blocks_forwarded,
                 primary_metrics.last_committed_round,
                 primary_metrics.committed_blocks,
+                primary_metrics.last_committed_version,
+                primary_metrics.storage_ledger_version,
             ));
         }
 
@@ -296,11 +332,22 @@ impl NetworkTest for ProxyPrimaryHappyPathTest {
             "Primary consensus: committed_blocks=0"
         );
 
+        // Verify execution and storage commit (state actually persisted)
+        ensure!(
+            primary_metrics.last_committed_version > 0,
+            "Execution: no transactions committed (last_committed_version=0)"
+        );
+        ensure!(
+            primary_metrics.storage_ledger_version > 0,
+            "Storage: ledger version not advancing (storage_ledger_version=0)"
+        );
+
         info!(
-            "Both consensus layers are active: proxy ordered {} blocks, primary committed {} blocks through round {}",
+            "Both consensus layers are active: proxy ordered {} blocks, primary committed {} blocks through round {}, version {}",
             proxy_metrics.blocks_ordered,
             primary_metrics.committed_blocks,
             primary_metrics.last_committed_round,
+            primary_metrics.last_committed_version,
         );
 
         Ok(())

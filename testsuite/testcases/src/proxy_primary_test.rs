@@ -400,6 +400,31 @@ impl NetworkTest for ProxyPrimaryLoadTest {
             ));
         }
 
+        // Verify proxy consensus produced blocks during the test window
+        ensure!(
+            proposals_delta > 0,
+            "Proxy consensus: no proposals sent during test window"
+        );
+        ensure!(
+            ordered_delta > 0,
+            "Proxy consensus: no blocks ordered during test window"
+        );
+        ensure!(
+            forwarded_delta > 0,
+            "Proxy consensus: no blocks forwarded during test window"
+        );
+
+        // Verify primary consensus committed blocks during the test window
+        ensure!(
+            primary_committed_delta > 0,
+            "Primary consensus: no blocks committed during test window"
+        );
+
+        info!(
+            "Load test passed: proxy ordered {} blocks ({:.2}/s), primary committed {} blocks in {:.1}s",
+            ordered_delta, proxy_blocks_per_sec, primary_committed_delta, duration_secs,
+        );
+
         Ok(())
     }
 }

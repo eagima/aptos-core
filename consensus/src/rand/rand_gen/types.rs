@@ -1059,7 +1059,7 @@ mod tests {
         let bad1 = Share::generate(&ctx.rand_configs[2], metadata.clone());
         let bad2 = Share::generate(&ctx.rand_configs[3], metadata.clone());
         let bad3 = Share::generate(&ctx.rand_configs[0], metadata.clone());
-        let shares = vec![
+        let shares = [
             real_share,
             RandShare::new(ctx.authors[1], metadata.clone(), bad1.share().clone()),
             RandShare::new(ctx.authors[2], metadata.clone(), bad2.share().clone()),

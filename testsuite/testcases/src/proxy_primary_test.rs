@@ -28,8 +28,12 @@
 //! - `aptos_proxy_blocks_per_primary_round` averaging 3+ blocks
 
 use anyhow::ensure;
-use aptos_forge::{NetworkContextSynchronizer, NetworkTest, NodeExt, Result, Test};
+use aptos_forge::{
+    GroupNetworkDelay, NetworkContextSynchronizer, NetworkTest, NodeExt, Result, SwarmChaos,
+    SwarmNetworkDelay, Test,
+};
 use aptos_inspection_service::inspection_client::InspectionClient;
+use aptos_types::account_address::AccountAddress;
 use async_trait::async_trait;
 use futures::future::join_all;
 use log::info;
@@ -232,6 +236,60 @@ async fn query_primary_metrics(
     Ok(metrics)
 }
 
+/// Create network delays simulating geo-distributed primary validators.
+///
+/// Splits validators into 3 regions and injects inter-region delays:
+/// - Region A <-> Region B: 150ms (e.g., US-West <-> EU)
+/// - Region A <-> Region C: 300ms (e.g., US-West <-> Asia)
+/// - Region B <-> Region C: 200ms (e.g., EU <-> Asia)
+///
+/// This forces multiple proxy blocks per primary round since primary
+/// consensus is slowed by inter-region latency.
+fn create_geo_distributed_delay(all_validators: Vec<AccountAddress>) -> SwarmNetworkDelay {
+    let n = all_validators.len();
+    let region_a_size = n / 3;
+    let region_b_size = n / 3;
+    let mut region_a = all_validators;
+    let mut region_b = region_a.split_off(region_a_size);
+    let region_c = region_b.split_off(region_b_size);
+
+    info!(
+        "Geo-distributed regions: A={} nodes, B={} nodes, C={} nodes",
+        region_a.len(),
+        region_b.len(),
+        region_c.len(),
+    );
+
+    SwarmNetworkDelay {
+        group_network_delays: vec![
+            GroupNetworkDelay {
+                name: "region-a-to-region-b".to_string(),
+                source_nodes: region_a.clone(),
+                target_nodes: region_b.clone(),
+                latency_ms: 150,
+                jitter_ms: 30,
+                correlation_percentage: 50,
+            },
+            GroupNetworkDelay {
+                name: "region-a-to-region-c".to_string(),
+                source_nodes: region_a.clone(),
+                target_nodes: region_c.clone(),
+                latency_ms: 300,
+                jitter_ms: 50,
+                correlation_percentage: 50,
+            },
+            GroupNetworkDelay {
+                name: "region-b-to-region-c".to_string(),
+                source_nodes: region_b.clone(),
+                target_nodes: region_c.clone(),
+                latency_ms: 200,
+                jitter_ms: 40,
+                correlation_percentage: 50,
+            },
+        ],
+    }
+}
+
 #[async_trait]
 impl NetworkTest for ProxyPrimaryHappyPathTest {
     async fn run<'a>(&self, ctx: NetworkContextSynchronizer<'a>) -> anyhow::Result<()> {
@@ -241,6 +299,22 @@ impl NetworkTest for ProxyPrimaryHappyPathTest {
         };
 
         info!("ProxyPrimaryHappyPathTest: Running for {:?}", duration);
+
+        // Inject geo-distributed network delays to simulate production latency.
+        // On local swarm this is a no-op; on k8s it uses Chaos Mesh.
+        {
+            let ctx = ctx.ctx.lock().await;
+            let all_validators: Vec<AccountAddress> = {
+                let swarm = ctx.swarm.read().await;
+                swarm.validators().map(|v| v.peer_id()).collect()
+            };
+            let delay = create_geo_distributed_delay(all_validators);
+            let mut swarm = ctx.swarm.write().await;
+            swarm
+                .inject_chaos(SwarmChaos::Delay(delay))
+                .await?;
+            info!("Injected geo-distributed network delays");
+        }
 
         // Collect inspection clients
         let inspection_clients: Vec<InspectionClient> = {
@@ -349,6 +423,13 @@ impl NetworkTest for ProxyPrimaryHappyPathTest {
             primary_metrics.last_committed_round,
             primary_metrics.last_committed_version,
         );
+
+        // Clean up chaos
+        {
+            let ctx = ctx.ctx.lock().await;
+            let mut swarm = ctx.swarm.write().await;
+            swarm.remove_all_chaos().await?;
+        }
 
         Ok(())
     }

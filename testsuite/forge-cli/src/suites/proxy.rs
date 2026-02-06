@@ -18,13 +18,19 @@ pub fn get_proxy_test(test_name: &str, _duration: Duration) -> Option<ForgeConfi
 }
 
 /// Basic happy path test for proxy primary consensus.
+///
+/// 7 validators split into 3 geo-distributed regions with injected
+/// inter-region latency (150-300ms). This simulates production topology
+/// where primary consensus is slow (geo-distributed quorum) while proxy
+/// consensus accumulates multiple blocks per primary round.
 pub fn proxy_primary_happy_path_test() -> ForgeConfig {
     ForgeConfig::default()
-        .with_initial_validator_count(NonZeroUsize::new(3).unwrap())
+        .with_initial_validator_count(NonZeroUsize::new(7).unwrap())
         .add_network_test(ProxyPrimaryHappyPathTest::default())
         .with_validator_override_node_config_fn(Arc::new(|config, _| {
             config.consensus.enable_proxy_consensus = true;
-            // Increase timeouts since proxy is not colocated in tests
+            // Proxy at 1s (matching original consensus default), primary at 10s
+            // to ensure proxy accumulates multiple blocks per primary round.
             config.consensus.proxy_consensus_config.round_initial_timeout_ms = 1000;
             config.consensus.round_initial_timeout_ms = 10000;
         }))
@@ -43,8 +49,7 @@ fn proxy_primary_load_test() -> ForgeConfig {
         .add_network_test(ProxyPrimaryLoadTest::default())
         .with_validator_override_node_config_fn(Arc::new(|config, _| {
             config.consensus.enable_proxy_consensus = true;
-            // Increase timeouts since proxy is not colocated in tests
-            config.consensus.proxy_consensus_config.round_initial_timeout_ms = 1000;
+            config.consensus.proxy_consensus_config.round_initial_timeout_ms = 100;
             config.consensus.round_initial_timeout_ms = 10000;
         }))
         // Simple success criteria for local swarm (no Prometheus needed)

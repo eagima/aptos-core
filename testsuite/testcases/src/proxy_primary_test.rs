@@ -27,6 +27,7 @@
 //! - `aptos_proxy_consensus_blocks_forwarded` > 0
 //! - `aptos_proxy_blocks_per_primary_round` averaging 3+ blocks
 
+use anyhow::ensure;
 use aptos_forge::{NetworkContextSynchronizer, NetworkTest, NodeExt, Result, Test};
 use aptos_inspection_service::inspection_client::InspectionClient;
 use async_trait::async_trait;
@@ -38,7 +39,7 @@ use log::info;
 /// This test verifies:
 /// - Proxy validators propose blocks at a faster rate than primary consensus
 /// - Ordered proxy blocks are correctly forwarded to primaries
-/// - Primary consensus aggregates proxy blocks correctly
+/// - Primary consensus continues to commit blocks
 pub struct ProxyPrimaryHappyPathTest {
     /// Expected minimum transactions per second
     pub min_tps: usize,
@@ -74,25 +75,86 @@ struct ProxyConsensusMetrics {
     timeout_leader: i64,
 }
 
-/// Query proxy consensus metrics from validators using inspection clients.
-async fn query_proxy_metrics(inspection_clients: &[InspectionClient]) -> Result<ProxyConsensusMetrics> {
+/// Primary consensus metrics from a single validator.
+#[derive(Debug, Default)]
+struct PrimaryConsensusMetrics {
+    last_committed_round: i64,
+    current_round: i64,
+    committed_blocks: i64,
+}
+
+/// Query proxy consensus metrics aggregated across all validators.
+async fn query_proxy_metrics(
+    inspection_clients: &[InspectionClient],
+) -> Result<ProxyConsensusMetrics> {
     let metrics_futures = inspection_clients.iter().map(|client| async move {
         // Note: forge_metrics endpoint stores label-less metrics with "{}" suffix
-        let proposals = client.get_node_metric_i64("aptos_proxy_consensus_proposals_sent{}").await.ok().flatten().unwrap_or(0);
-        let votes = client.get_node_metric_i64("aptos_proxy_consensus_votes_sent{}").await.ok().flatten().unwrap_or(0);
-        let qcs = client.get_node_metric_i64("aptos_proxy_consensus_qcs_formed{}").await.ok().flatten().unwrap_or(0);
-        let ordered = client.get_node_metric_i64("aptos_proxy_consensus_blocks_ordered{}").await.ok().flatten().unwrap_or(0);
-        let forwarded = client.get_node_metric_i64("aptos_proxy_consensus_blocks_forwarded{}").await.ok().flatten().unwrap_or(0);
-        let backpressure = client.get_node_metric_i64("aptos_proxy_backpressure_events{}").await.ok().flatten().unwrap_or(0);
-        let timeout_all = client.get_node_metric_i64("aptos_proxy_round_timeout_all{}").await.ok().flatten().unwrap_or(0);
-        let timeout_leader = client.get_node_metric_i64("aptos_proxy_round_timeout_count{}").await.ok().flatten().unwrap_or(0);
-        (proposals, votes, qcs, ordered, forwarded, backpressure, timeout_all, timeout_leader)
+        let proposals = client
+            .get_node_metric_i64("aptos_proxy_consensus_proposals_sent{}")
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or(0);
+        let votes = client
+            .get_node_metric_i64("aptos_proxy_consensus_votes_sent{}")
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or(0);
+        let qcs = client
+            .get_node_metric_i64("aptos_proxy_consensus_qcs_formed{}")
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or(0);
+        let ordered = client
+            .get_node_metric_i64("aptos_proxy_consensus_blocks_ordered{}")
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or(0);
+        let forwarded = client
+            .get_node_metric_i64("aptos_proxy_consensus_blocks_forwarded{}")
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or(0);
+        let backpressure = client
+            .get_node_metric_i64("aptos_proxy_backpressure_events{}")
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or(0);
+        let timeout_all = client
+            .get_node_metric_i64("aptos_proxy_round_timeout_all{}")
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or(0);
+        let timeout_leader = client
+            .get_node_metric_i64("aptos_proxy_round_timeout_count{}")
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or(0);
+        (
+            proposals,
+            votes,
+            qcs,
+            ordered,
+            forwarded,
+            backpressure,
+            timeout_all,
+            timeout_leader,
+        )
     });
 
     let results = join_all(metrics_futures).await;
 
     let mut metrics = ProxyConsensusMetrics::default();
-    for (proposals, votes, qcs, ordered, forwarded, backpressure, timeout_all, timeout_leader) in results {
+    for (proposals, votes, qcs, ordered, forwarded, backpressure, timeout_all, timeout_leader) in
+        results
+    {
         metrics.proposals_sent += proposals;
         metrics.votes_sent += votes;
         metrics.qcs_formed += qcs;
@@ -101,6 +163,44 @@ async fn query_proxy_metrics(inspection_clients: &[InspectionClient]) -> Result<
         metrics.backpressure_events += backpressure;
         metrics.timeout_all += timeout_all;
         metrics.timeout_leader += timeout_leader;
+    }
+
+    Ok(metrics)
+}
+
+/// Query primary consensus metrics from all validators, returning the max across nodes.
+async fn query_primary_metrics(
+    inspection_clients: &[InspectionClient],
+) -> Result<PrimaryConsensusMetrics> {
+    let metrics_futures = inspection_clients.iter().map(|client| async move {
+        let committed_round = client
+            .get_node_metric_i64("aptos_consensus_last_committed_round{}")
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or(0);
+        let current_round = client
+            .get_node_metric_i64("aptos_consensus_current_round{}")
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or(0);
+        let committed_blocks = client
+            .get_node_metric_i64("aptos_consensus_committed_blocks_count{}")
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or(0);
+        (committed_round, current_round, committed_blocks)
+    });
+
+    let results = join_all(metrics_futures).await;
+
+    let mut metrics = PrimaryConsensusMetrics::default();
+    for (committed_round, current_round, committed_blocks) in results {
+        metrics.last_committed_round = metrics.last_committed_round.max(committed_round);
+        metrics.current_round = metrics.current_round.max(current_round);
+        metrics.committed_blocks = metrics.committed_blocks.max(committed_blocks);
     }
 
     Ok(metrics)
@@ -123,54 +223,85 @@ impl NetworkTest for ProxyPrimaryHappyPathTest {
             swarm.validators().map(|v| v.inspection_client()).collect()
         };
 
-        // Wait for majority of test duration to let proxy consensus produce blocks
-        tokio::time::sleep(duration.mul_f32(0.8)).await;
+        // Wait for the test duration to let both consensus layers produce blocks
+        tokio::time::sleep(duration).await;
 
-        // Query proxy consensus metrics from all validators
-        let metrics = query_proxy_metrics(&inspection_clients).await?;
+        // Query metrics from both consensus layers
+        let proxy_metrics = query_proxy_metrics(&inspection_clients).await?;
+        let primary_metrics = query_primary_metrics(&inspection_clients).await?;
 
-        // Log metrics
+        // Log proxy consensus metrics
         info!("Proxy consensus metrics:");
-        info!("  proposals_sent: {}", metrics.proposals_sent);
-        info!("  votes_sent: {}", metrics.votes_sent);
-        info!("  qcs_formed: {}", metrics.qcs_formed);
-        info!("  blocks_ordered: {}", metrics.blocks_ordered);
-        info!("  blocks_forwarded: {}", metrics.blocks_forwarded);
+        info!("  proposals_sent: {}", proxy_metrics.proposals_sent);
+        info!("  votes_sent: {}", proxy_metrics.votes_sent);
+        info!("  qcs_formed: {}", proxy_metrics.qcs_formed);
+        info!("  blocks_ordered: {}", proxy_metrics.blocks_ordered);
+        info!("  blocks_forwarded: {}", proxy_metrics.blocks_forwarded);
+        info!("  timeouts_all: {}", proxy_metrics.timeout_all);
+        info!("  timeouts_leader: {}", proxy_metrics.timeout_leader);
+
+        // Log primary consensus metrics
+        info!("Primary consensus metrics:");
+        info!(
+            "  last_committed_round: {}",
+            primary_metrics.last_committed_round
+        );
+        info!("  current_round: {}", primary_metrics.current_round);
+        info!("  committed_blocks: {}", primary_metrics.committed_blocks);
 
         // Report to test framework
         {
             let mut ctx = ctx.ctx.lock().await;
             ctx.report.report_text(format!(
-                "Proxy consensus metrics: proposals={}, votes={}, qcs={}, ordered={}, forwarded={}, timeouts_all={}, timeouts_leader={}",
-                metrics.proposals_sent,
-                metrics.votes_sent,
-                metrics.qcs_formed,
-                metrics.blocks_ordered,
-                metrics.blocks_forwarded,
-                metrics.timeout_all,
-                metrics.timeout_leader,
+                "Proxy: proposals={}, votes={}, qcs={}, ordered={}, forwarded={} | Primary: committed_round={}, committed_blocks={}",
+                proxy_metrics.proposals_sent,
+                proxy_metrics.votes_sent,
+                proxy_metrics.qcs_formed,
+                proxy_metrics.blocks_ordered,
+                proxy_metrics.blocks_forwarded,
+                primary_metrics.last_committed_round,
+                primary_metrics.committed_blocks,
             ));
         }
 
         // Verify proxy consensus is actively producing blocks
-        let has_activity = metrics.proposals_sent > 0
-            || metrics.votes_sent > 0
-            || metrics.qcs_formed > 0
-            || metrics.blocks_ordered > 0;
+        ensure!(
+            proxy_metrics.proposals_sent > 0,
+            "Proxy consensus: no proposals sent"
+        );
+        ensure!(
+            proxy_metrics.votes_sent > 0,
+            "Proxy consensus: no votes sent"
+        );
+        ensure!(
+            proxy_metrics.qcs_formed > 0,
+            "Proxy consensus: no QCs formed"
+        );
+        ensure!(
+            proxy_metrics.blocks_ordered > 0,
+            "Proxy consensus: no blocks ordered"
+        );
+        ensure!(
+            proxy_metrics.blocks_forwarded > 0,
+            "Proxy consensus: no blocks forwarded to primaries"
+        );
 
-        let has_timeouts = metrics.timeout_all > 0;
+        // Verify primary consensus is committing blocks
+        ensure!(
+            primary_metrics.last_committed_round > 0,
+            "Primary consensus: no blocks committed (last_committed_round=0)"
+        );
+        ensure!(
+            primary_metrics.committed_blocks > 0,
+            "Primary consensus: committed_blocks=0"
+        );
 
-        if has_activity {
-            info!("Proxy consensus is active!");
-        } else if has_timeouts {
-            info!("Proxy consensus timeouts are firing (all={}, leader={}) but no proposals - investigating leader election",
-                metrics.timeout_all, metrics.timeout_leader);
-        } else {
-            info!("Proxy consensus metrics are all zero - proxy consensus may not be starting");
-        }
-
-        // Wait remaining time
-        tokio::time::sleep(duration.mul_f32(0.2)).await;
+        info!(
+            "Both consensus layers are active: proxy ordered {} blocks, primary committed {} blocks through round {}",
+            proxy_metrics.blocks_ordered,
+            primary_metrics.committed_blocks,
+            primary_metrics.last_committed_round,
+        );
 
         Ok(())
     }
@@ -225,53 +356,48 @@ impl NetworkTest for ProxyPrimaryLoadTest {
         };
 
         // Take initial metric snapshot
-        let start_metrics = query_proxy_metrics(&inspection_clients).await?;
+        let start_proxy = query_proxy_metrics(&inspection_clients).await?;
+        let start_primary = query_primary_metrics(&inspection_clients).await?;
 
         // Wait for test duration
         tokio::time::sleep(duration).await;
 
         // Take final metric snapshot
-        let end_metrics = query_proxy_metrics(&inspection_clients).await?;
+        let end_proxy = query_proxy_metrics(&inspection_clients).await?;
+        let end_primary = query_primary_metrics(&inspection_clients).await?;
 
         // Calculate deltas
-        let proposals_delta = end_metrics.proposals_sent - start_metrics.proposals_sent;
-        let votes_delta = end_metrics.votes_sent - start_metrics.votes_sent;
-        let qcs_delta = end_metrics.qcs_formed - start_metrics.qcs_formed;
-        let ordered_delta = end_metrics.blocks_ordered - start_metrics.blocks_ordered;
-        let forwarded_delta = end_metrics.blocks_forwarded - start_metrics.blocks_forwarded;
-        let backpressure_delta = end_metrics.backpressure_events - start_metrics.backpressure_events;
+        let proposals_delta = end_proxy.proposals_sent - start_proxy.proposals_sent;
+        let ordered_delta = end_proxy.blocks_ordered - start_proxy.blocks_ordered;
+        let forwarded_delta = end_proxy.blocks_forwarded - start_proxy.blocks_forwarded;
+        let backpressure_delta =
+            end_proxy.backpressure_events - start_proxy.backpressure_events;
+        let primary_committed_delta =
+            end_primary.committed_blocks - start_primary.committed_blocks;
 
-        info!("Proxy consensus metrics (delta during test):");
-        info!("  proposals_sent: {}", proposals_delta);
-        info!("  votes_sent: {}", votes_delta);
-        info!("  qcs_formed: {}", qcs_delta);
-        info!("  blocks_ordered: {}", ordered_delta);
-        info!("  blocks_forwarded: {}", forwarded_delta);
-        info!("  backpressure_events: {}", backpressure_delta);
-
-        // Calculate blocks per second
         let duration_secs = duration.as_secs_f64();
-        let blocks_per_sec = if duration_secs > 0.0 {
+        let proxy_blocks_per_sec = if duration_secs > 0.0 {
             ordered_delta as f64 / duration_secs
         } else {
             0.0
         };
 
+        info!("Load test metrics (delta):");
+        info!("  proxy proposals: {}", proposals_delta);
+        info!("  proxy blocks ordered: {}", ordered_delta);
+        info!("  proxy blocks forwarded: {}", forwarded_delta);
+        info!("  proxy blocks/sec: {:.2}", proxy_blocks_per_sec);
+        info!("  primary blocks committed: {}", primary_committed_delta);
+        info!("  backpressure events: {}", backpressure_delta);
+
         // Report to test framework
         {
             let mut ctx = ctx.ctx.lock().await;
             ctx.report.report_text(format!(
-                "Proxy load test: {} blocks ordered in {:.1}s ({:.2} blocks/sec), {} backpressure events",
-                ordered_delta, duration_secs, blocks_per_sec, backpressure_delta
+                "Proxy load: {} ordered ({:.2}/s), {} forwarded, {} primary committed, {} backpressure in {:.1}s",
+                ordered_delta, proxy_blocks_per_sec, forwarded_delta,
+                primary_committed_delta, backpressure_delta, duration_secs,
             ));
-        }
-
-        // Log warnings if backpressure triggered frequently
-        if backpressure_delta > 10 {
-            info!(
-                "High backpressure: {} events triggered during test",
-                backpressure_delta
-            );
         }
 
         Ok(())

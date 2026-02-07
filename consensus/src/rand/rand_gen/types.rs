@@ -125,6 +125,7 @@ impl TShare for Share {
                 &rand_config.get_all_certified_apk(),
                 metadata_serialized.as_slice(),
                 &proof,
+                THREAD_MANAGER.get_exe_cpu_pool(),
             )
             .is_ok()
             {

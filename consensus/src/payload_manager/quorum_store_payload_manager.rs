@@ -138,7 +138,7 @@ impl TPayloadManager for QuorumStorePayloadManager {
                 Payload::DeprecatedInQuorumStore(_)
                 | Payload::DeprecatedInQuorumStoreWithLimit(_)
                 | Payload::DeprecatedQuorumStoreInlineHybrid(..)
-                | Payload::DeprecatedQuorumStoreInlineHybridV2(..) => vec![],
+                | Payload::DeprecatedQuorumStoreInlineHybridV2(..) => unreachable!(),
             })
             .collect();
 
@@ -388,7 +388,7 @@ impl TPayloadManager for QuorumStorePayloadManager {
             | Payload::DeprecatedInQuorumStoreWithLimit(_)
             | Payload::DeprecatedQuorumStoreInlineHybrid(..)
             | Payload::DeprecatedQuorumStoreInlineHybridV2(..) => {
-                return Ok((Vec::new(), None, None));
+                unreachable!();
             },
         };
 
@@ -424,7 +424,7 @@ fn get_inline_transactions(block: &Block) -> Vec<SignedTransaction> {
         | Payload::DeprecatedInQuorumStore(_)
         | Payload::DeprecatedInQuorumStoreWithLimit(_)
         | Payload::DeprecatedQuorumStoreInlineHybrid(..)
-        | Payload::DeprecatedQuorumStoreInlineHybridV2(..) => vec![],
+        | Payload::DeprecatedQuorumStoreInlineHybridV2(..) => unreachable!(),
     }
 }
 

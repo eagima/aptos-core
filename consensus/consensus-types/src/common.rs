@@ -5,7 +5,7 @@ use crate::{
     payload::{OptBatches, OptQuorumStorePayload, PayloadExecutionLimit, TxnAndGasLimits},
     proof_of_store::{BatchInfo, BatchInfoExt, ProofCache, ProofOfStore, TBatchInfo},
 };
-use anyhow::ensure;
+use anyhow::{bail, ensure};
 use aptos_crypto::{
     hash::{CryptoHash, CryptoHasher},
     HashValue,
@@ -187,7 +187,7 @@ impl Payload {
             Payload::DeprecatedInQuorumStore(_)
             | Payload::DeprecatedInQuorumStoreWithLimit(_)
             | Payload::DeprecatedQuorumStoreInlineHybrid(..)
-            | Payload::DeprecatedQuorumStoreInlineHybridV2(..) => self,
+            | Payload::DeprecatedQuorumStoreInlineHybridV2(..) => unreachable!(),
         }
     }
 
@@ -207,7 +207,7 @@ impl Payload {
             Payload::DeprecatedInQuorumStore(_)
             | Payload::DeprecatedInQuorumStoreWithLimit(_)
             | Payload::DeprecatedQuorumStoreInlineHybrid(..)
-            | Payload::DeprecatedQuorumStoreInlineHybridV2(..) => 0,
+            | Payload::DeprecatedQuorumStoreInlineHybridV2(..) => unreachable!(),
         }
     }
 
@@ -223,7 +223,7 @@ impl Payload {
             Payload::DeprecatedInQuorumStore(_)
             | Payload::DeprecatedInQuorumStoreWithLimit(_)
             | Payload::DeprecatedQuorumStoreInlineHybrid(..)
-            | Payload::DeprecatedQuorumStoreInlineHybridV2(..) => 0,
+            | Payload::DeprecatedQuorumStoreInlineHybridV2(..) => unreachable!(),
         }
     }
 
@@ -235,7 +235,7 @@ impl Payload {
             Payload::DeprecatedInQuorumStore(_)
             | Payload::DeprecatedInQuorumStoreWithLimit(_)
             | Payload::DeprecatedQuorumStoreInlineHybrid(..)
-            | Payload::DeprecatedQuorumStoreInlineHybridV2(..) => true,
+            | Payload::DeprecatedQuorumStoreInlineHybridV2(..) => unreachable!(),
         }
     }
 
@@ -274,7 +274,7 @@ impl Payload {
             Payload::DeprecatedInQuorumStore(_)
             | Payload::DeprecatedInQuorumStoreWithLimit(_)
             | Payload::DeprecatedQuorumStoreInlineHybrid(..)
-            | Payload::DeprecatedQuorumStoreInlineHybridV2(..) => 0,
+            | Payload::DeprecatedQuorumStoreInlineHybridV2(..) => unreachable!(),
         }
     }
 
@@ -388,7 +388,9 @@ impl Payload {
             Payload::DeprecatedInQuorumStore(_)
             | Payload::DeprecatedInQuorumStoreWithLimit(_)
             | Payload::DeprecatedQuorumStoreInlineHybrid(..)
-            | Payload::DeprecatedQuorumStoreInlineHybridV2(..) => Ok(()),
+            | Payload::DeprecatedQuorumStoreInlineHybridV2(..) => {
+                bail!("Unsupported payload type {}", self)
+            },
         }
     }
 }

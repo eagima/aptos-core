@@ -211,7 +211,7 @@ impl TPayloadManager for QuorumStorePayloadManager {
             Payload::DeprecatedInQuorumStore(_)
             | Payload::DeprecatedInQuorumStoreWithLimit(_)
             | Payload::DeprecatedQuorumStoreInlineHybrid(..)
-            | Payload::DeprecatedQuorumStoreInlineHybridV2(..) => {},
+            | Payload::DeprecatedQuorumStoreInlineHybridV2(..) => unreachable!(),
         };
     }
 
@@ -303,7 +303,7 @@ impl TPayloadManager for QuorumStorePayloadManager {
             Payload::DeprecatedInQuorumStore(_)
             | Payload::DeprecatedInQuorumStoreWithLimit(_)
             | Payload::DeprecatedQuorumStoreInlineHybrid(..)
-            | Payload::DeprecatedQuorumStoreInlineHybridV2(..) => Ok(()),
+            | Payload::DeprecatedQuorumStoreInlineHybridV2(..) => unreachable!(),
         }
     }
 

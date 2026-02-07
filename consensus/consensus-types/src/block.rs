@@ -120,7 +120,7 @@ impl Block {
                 Payload::DeprecatedInQuorumStore(_)
                 | Payload::DeprecatedInQuorumStoreWithLimit(_)
                 | Payload::DeprecatedQuorumStoreInlineHybrid(..)
-                | Payload::DeprecatedQuorumStoreInlineHybridV2(..) => 0,
+                | Payload::DeprecatedQuorumStoreInlineHybridV2(..) => unreachable!(),
             },
         }
     }
@@ -148,7 +148,7 @@ impl Block {
                 Payload::DeprecatedInQuorumStore(_)
                 | Payload::DeprecatedInQuorumStoreWithLimit(_)
                 | Payload::DeprecatedQuorumStoreInlineHybrid(..)
-                | Payload::DeprecatedQuorumStoreInlineHybridV2(..) => (0, 0, 0),
+                | Payload::DeprecatedQuorumStoreInlineHybridV2(..) => unreachable!(),
             },
         }
     }
@@ -175,7 +175,7 @@ impl Block {
                 | Payload::DeprecatedInQuorumStore(_)
                 | Payload::DeprecatedInQuorumStoreWithLimit(_)
                 | Payload::DeprecatedQuorumStoreInlineHybrid(..)
-                | Payload::DeprecatedQuorumStoreInlineHybridV2(..) => (0, 0, 0),
+                | Payload::DeprecatedQuorumStoreInlineHybridV2(..) => unreachable!(),
             },
         }
     }

@@ -303,7 +303,7 @@ impl Tool {
                 let build_config = BuildConfig {
                     dev_mode: req.dev,
                     test_mode: req.test_mode,
-                    verify_mode: req.verify_mode,
+                    verify_mode: Some(req.verify_mode),
                     additional_named_addresses: named_addresses,
                     skip_fetch_latest_git_deps: true,
                     compiler_config: CompilerConfig {

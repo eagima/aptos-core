@@ -312,6 +312,24 @@ impl QueryEngine {
             .map(|attr| self.format_attribute(attr))
             .collect();
 
+        let callees: Vec<String> = func
+            .get_called_functions()
+            .map(|funs| {
+                funs.iter()
+                    .map(|qfid| self.env.get_function(*qfid).get_full_name_str())
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let callers: Vec<String> = func
+            .get_calling_functions()
+            .map(|funs| {
+                funs.iter()
+                    .map(|qfid| self.env.get_function(*qfid).get_full_name_str())
+                    .collect()
+            })
+            .unwrap_or_default();
+
         Function {
             module: func.module_env.get_full_name_str(),
             name: func.get_name_str().to_string(),
@@ -325,6 +343,8 @@ impl QueryEngine {
             is_native: func.is_native(),
             attributes,
             acquires,
+            callees,
+            callers,
         }
     }
 

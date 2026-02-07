@@ -78,6 +78,10 @@ pub struct Function {
     pub is_native: bool,
     pub attributes: Vec<String>,
     pub acquires: Vec<String>,
+    /// Functions that this function calls (full names, e.g., "0x1::coin::transfer").
+    pub callees: Vec<String>,
+    /// Functions that call this function (full names, e.g., "0x1::coin::transfer").
+    pub callers: Vec<String>,
 }
 
 /// Move struct or enum.

@@ -257,12 +257,8 @@ impl WeightedVUF for PinkasWUF {
 
         let lhs: Vec<G1Projective> = pis.into_iter().chain([pp.g_neg]).collect();
         let rhs: Vec<G2Projective> = shares.into_iter().chain([h.mul(sum_of_taus)]).collect();
-        if parallel_multi_pairing(
-            lhs.iter(),
-            rhs.iter(),
-            thread_pool,
-            MIN_MULTIPAIR_NUM_JOBS,
-        ) != Gt::identity()
+        if parallel_multi_pairing(lhs.iter(), rhs.iter(), thread_pool, MIN_MULTIPAIR_NUM_JOBS)
+            != Gt::identity()
         {
             bail!("Multipairing check in batched aggregate verification failed");
         }
